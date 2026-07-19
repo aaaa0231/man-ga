@@ -55,17 +55,6 @@ _SKIP_HEADERS = {"content-encoding", "content-length", "transfer-encoding", "con
 
 # -------------------------------------------------------
 # 画像 URL を /imgproxy/ 経由に書き換える
-#
-#   対象:
-#     <img src="https://...">
-#     <img srcset="https://... 1x, https://... 2x">
-#     <source srcset="...">
-#     CSS url("https://...") / url('https://...') / url(https://...)
-#     data-src / data-srcset (遅延ロード系)
-#     style="background-image: url(...)"
-#
-#   /imgproxy/ 自体や data: URI はスキップ。
-#   将来ほかのサイトに切り替えても ORIGIN だけ変えれば動く。
 # -------------------------------------------------------
 
 # 画像拡張子にマッチするパターン（URL に含まれていれば画像とみなす）
@@ -88,7 +77,6 @@ def _to_imgproxy(url: str) -> str:
     """絶対 URL を /imgproxy/{host+path} に変換。https?:// は落とす。すでに /imgproxy/ なら変えない。"""
     if "/imgproxy/" in url:
         return url
-    # プロトコル部分を除去（imgproxy エンドポイント側で https:// を補完する）
     stripped = re.sub(r'^https?://', '', url)
     return f"/imgproxy/{stripped}"
 
@@ -103,13 +91,9 @@ def _rewrite_srcset(srcset: str) -> str:
 def remove_ads(html: str) -> str:
     """
     HTML 文字列中の広告コードを物理削除・無効化する。
-    1. 指定ドメインを含む <script> タグをまるごと削除
-    2. adexchangerapid.com の強制リンク (<a> タグ) を削除  ← ドメイン置換より先に実行
-    3. ドメイン文字列を localhost に置換して残存参照を無効化（大文字小文字不問）
     """
     for domain in AD_DOMAINS:
         escaped = re.escape(domain)
-        # 1. <script ...domain...>...</script> を丸ごと削除
         html = re.sub(
             r'<script[^>]*' + escaped + r'[^>]*>.*?</script>',
             '',
@@ -117,7 +101,6 @@ def remove_ads(html: str) -> str:
             flags=re.IGNORECASE | re.DOTALL,
         )
 
-    # 2. adexchangerapid.com を含む <a> タグを削除（ドメイン置換より前に実行）
     html = re.sub(
         r'<a[^>]*adexchangerapid\.com[^>]*>.*?</a>',
         '',
@@ -125,7 +108,6 @@ def remove_ads(html: str) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     )
 
-    # 3. ドメイン文字列を大文字小文字不問で localhost に置換して残存参照を無効化
     for domain in AD_DOMAINS:
         escaped = re.escape(domain)
         html = re.sub(escaped, 'localhost', html, flags=re.IGNORECASE)
@@ -136,10 +118,7 @@ def remove_ads(html: str) -> str:
 def rewrite_img_urls(html: str) -> str:
     """
     HTML 文字列中の画像 URL をすべて /imgproxy/ 経由に書き換える。
-    将来サイトが変わっても、この関数を通るだけで画像は自動的にプロキシされる。
     """
-
-    # 1. <img src="..." /> / <source src="..." />
     def rewrite_src(m: re.Match) -> str:
         attr, quote, url = m.group(1), m.group(2), m.group(3)
         if url.startswith("data:") or "/imgproxy/" in url:
@@ -153,7 +132,6 @@ def rewrite_img_urls(html: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    # 2. data-src / data-lazy-src などの遅延ロード系
     html = re.sub(
         r'(data-(?:src|lazy-src|original|bg))=(["\'])(https?://[^\s"\']+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\']*)\2',
         rewrite_src,
@@ -161,7 +139,6 @@ def rewrite_img_urls(html: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    # 3. srcset / data-srcset
     def rewrite_srcset_attr(m: re.Match) -> str:
         attr, quote, val = m.group(1), m.group(2), m.group(3)
         return f'{attr}={quote}{_rewrite_srcset(val)}{quote}'
@@ -173,7 +150,6 @@ def rewrite_img_urls(html: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    # 4. CSS url(...) — インラインスタイルや <style> ブロック内
     def rewrite_css_url(m: re.Match) -> str:
         quote, url = m.group(1), m.group(2)
         if url.startswith("data:") or "/imgproxy/" in url:
@@ -190,7 +166,6 @@ def rewrite_img_urls(html: str) -> str:
 # -------------------------------------------------------
 @app.get("/imgproxy/{image_url:path}")
 async def imgproxy(image_url: str, request: Request):
-    # URLエンコードされた https%3A// を復元
     image_url = image_url.replace("https%3A//", "https://").replace("http%3A//", "http://")
     if not image_url.startswith("http"):
         image_url = "https://" + image_url
@@ -221,20 +196,38 @@ async def imgproxy(image_url: str, request: Request):
 # /{full_path}  — 汎用リバースプロキシ
 #   HTML レスポンスの場合は画像 URL を /imgproxy/ 経由に書き換える。
 # -------------------------------------------------------
-@app.api_route("/{full_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS"])
+@app.api_route("/{full_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def proxy(request: Request, full_path: str):
     raw_path = request.scope.get("raw_path", b"").decode("utf-8", errors="replace")
     url = f"{ORIGIN}{raw_path}"
     if request.url.query:
         url += f"?{request.url.query}"
 
+    # 1. ブラウザから届いたアクセス元 (Referer) のドメインを ORIGIN に書き換えて偽装する
+    client_referer = request.headers.get("referer", "")
+    if client_referer:
+        client_host = request.headers.get("host", "")
+        fake_referer = client_referer.replace(f"https://{client_host}", ORIGIN).replace(f"http://{client_host}", ORIGIN)
+    else:
+        fake_referer = f"{ORIGIN}/"
+
+    # 2. 相手サーバー（WAFやボット対策）をすり抜けるためのヘッダーを構築
     proxy_headers = {
+        "Host":              ORIGIN.replace("https://", "").replace("http://", ""),
         "X-Forwarded-Host":  request.headers.get("host", ""),
         "X-Forwarded-Proto": "https",
-        "User-Agent":        request.headers.get("user-agent", ""),
-        "Accept":            request.headers.get("accept", ""),
+        "User-Agent":        request.headers.get("user-agent", "Mozilla/5.0"),
+        "Accept":            request.headers.get("accept", "*/*"),
+        "Accept-Language":   request.headers.get("accept-language", "ja,en-US;q=0.9,en;q=0.8"),
         "Cookie":            request.headers.get("cookie", ""),
+        "Referer":           fake_referer,
+        "Origin":            ORIGIN,
     }
+
+    # 3. POST通信やAjax(非同期通信)に必要なヘッダーがあればそのまま転送する
+    for header_name in ["content-type", "x-requested-with", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"]:
+        if header_name in request.headers:
+            proxy_headers[header_name.title()] = request.headers[header_name]
 
     body = None
     if request.method not in ("GET", "HEAD"):
@@ -251,6 +244,7 @@ async def proxy(request: Request, full_path: str):
         content_type = res.headers.get("content-type", "")
         res_headers = {k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS}
         res_headers["Access-Control-Allow-Origin"] = "*"
+        res_headers["Access-Control-Allow-Credentials"] = "true"
 
         # HTML レスポンスのみ広告削除 + 画像 URL を書き換える
         if "text/html" in content_type:
