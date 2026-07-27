@@ -1,5 +1,5 @@
-from contextlib import asynccontextmanager
 import re
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -13,6 +13,7 @@ ORIGIN = "https://mangarw.com"
 # -------------------------------------------------------
 # 広告抹殺パターン設定
 # (参考: ねむ様)
+# ※ 消えない広告がある場合、F12開発者ツールでドメインを調べてここに追加してください。
 # -------------------------------------------------------
 AD_DOMAINS = [
     "universityshocksooner.com",
@@ -23,11 +24,13 @@ AD_DOMAINS = [
     "vntsm.com",
 ]
 
+
 # -------------------------------------------------------
 # アプリ起動 / 終了時に httpx クライアントを管理
 # -------------------------------------------------------
 class Core:
     http_client: httpx.AsyncClient | None = None
+
 
 core = Core()
 
@@ -51,7 +54,13 @@ app.add_middleware(
 # -------------------------------------------------------
 # 除外するレスポンスヘッダー
 # -------------------------------------------------------
-_SKIP_HEADERS = {"content-encoding", "content-length", "transfer-encoding", "connection", "content-security-policy"}
+_SKIP_HEADERS = {
+    "content-encoding",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "content-security-policy",
+}
 
 # -------------------------------------------------------
 # 画像 URL を /imgproxy/ 経由に書き換える
@@ -64,7 +73,7 @@ _IMG_EXT_RE = re.compile(
 )
 
 # srcset の各エントリ: "url [descriptor], url [descriptor], ..."
-_SRCSET_ENTRY_RE = re.compile(r'(https?://[^\s,]+)', re.IGNORECASE)
+_SRCSET_ENTRY_RE = re.compile(r"(https?://[^\s,]+)", re.IGNORECASE)
 
 # CSS url(...)
 _CSS_URL_RE = re.compile(
@@ -77,40 +86,76 @@ def _to_imgproxy(url: str) -> str:
     """絶対 URL を /imgproxy/{host+path} に変換。https?:// は落とす。すでに /imgproxy/ なら変えない。"""
     if "/imgproxy/" in url:
         return url
-    stripped = re.sub(r'^https?://', '', url)
+    # 【変更・追加】もし画像URL自体が広告ドメインの場合はプロキシせず無効化する
+    for ad_domain in AD_DOMAINS:
+        if ad_domain in url:
+            return "about:blank"
+
+    stripped = re.sub(r"^https?://", "", url)
     return f"/imgproxy/{stripped}"
 
 
 def _rewrite_srcset(srcset: str) -> str:
     """srcset 属性値内の各 URL を /imgproxy/ 経由に書き換える。"""
+
     def replace_url(m: re.Match) -> str:
         return _to_imgproxy(m.group(1))
+
     return _SRCSET_ENTRY_RE.sub(replace_url, srcset)
 
 
+# -------------------------------------------------------
+# 広告除去処理（強化版）
+# -------------------------------------------------------
 def remove_ads(html: str) -> str:
     """
     HTML 文字列中の広告コードを物理削除・無効化する。
     """
+    # 1. <script>、<iframe>、<a> タグごと物理削除 【変更・追加: iframe と a を対象に追加】
     for domain in AD_DOMAINS:
         escaped = re.escape(domain)
+        # <script> の削除
         html = re.sub(
-            r'<script[^>]*' + escaped + r'[^>]*>.*?</script>',
-            '',
+            r"<script[^>]*" + escaped + r"[^>]*>.*?</script>",
+            "",
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        # <iframe> の削除
+        html = re.sub(
+            r"<iframe[^>]*" + escaped + r"[^>]*>.*?</iframe>",
+            "",
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        # 広告へのリンク <a> タグごと削除
+        html = re.sub(
+            r"<a[^>]*" + escaped + r"[^>]*>.*?</a>",
+            "",
             html,
             flags=re.IGNORECASE | re.DOTALL,
         )
 
+    # 2. 既知の厄介なドメインのピンポイント削除
     html = re.sub(
-        r'<a[^>]*adexchangerapid\.com[^>]*>.*?</a>',
-        '',
+        r"<a[^>]*adexchangerapid\.com[^>]*>.*?</a>",
+        "",
         html,
         flags=re.IGNORECASE | re.DOTALL,
     )
 
+    # 3. 広告コンテナ（<div>など）のよくあるクラス名やIDでの物理削除 【変更・追加】
+    # ※ 相手サイトに特有の広告用 class や id があれば、このリストに追加してください
+    ad_class_patterns = [
+        r'<div[^>]*(?:class|id)=["\'][^"\']*(?:ad-banner|popup-ad|overlay-ad)[^"\']*["\'][^>]*>.*?</div>',
+    ]
+    for pattern in ad_class_patterns:
+        html = re.sub(pattern, "", html, flags=re.IGNORECASE | re.DOTALL)
+
+    # 4. 残ったドメイン文字列を localhost に置換して無効化
     for domain in AD_DOMAINS:
         escaped = re.escape(domain)
-        html = re.sub(escaped, 'localhost', html, flags=re.IGNORECASE)
+        html = re.sub(escaped, "localhost", html, flags=re.IGNORECASE)
 
     return html
 
@@ -119,11 +164,12 @@ def rewrite_img_urls(html: str) -> str:
     """
     HTML 文字列中の画像 URL をすべて /imgproxy/ 経由に書き換える。
     """
+
     def rewrite_src(m: re.Match) -> str:
         attr, quote, url = m.group(1), m.group(2), m.group(3)
         if url.startswith("data:") or "/imgproxy/" in url:
             return m.group(0)
-        return f'{attr}={quote}{_to_imgproxy(url)}{quote}'
+        return f"{attr}={quote}{_to_imgproxy(url)}{quote}"
 
     html = re.sub(
         r'(src)=(["\'])(https?://[^\s"\']+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\']*)\2',
@@ -141,7 +187,7 @@ def rewrite_img_urls(html: str) -> str:
 
     def rewrite_srcset_attr(m: re.Match) -> str:
         attr, quote, val = m.group(1), m.group(2), m.group(3)
-        return f'{attr}={quote}{_rewrite_srcset(val)}{quote}'
+        return f"{attr}={quote}{_rewrite_srcset(val)}{quote}"
 
     html = re.sub(
         r'((?:data-)?srcset)=(["\'])([^"\']+)\2',
@@ -154,7 +200,7 @@ def rewrite_img_urls(html: str) -> str:
         quote, url = m.group(1), m.group(2)
         if url.startswith("data:") or "/imgproxy/" in url:
             return m.group(0)
-        return f'url({quote}{_to_imgproxy(url)}{quote})'
+        return f"url({quote}{_to_imgproxy(url)}{quote})"
 
     html = _CSS_URL_RE.sub(rewrite_css_url, html)
 
@@ -166,19 +212,28 @@ def rewrite_img_urls(html: str) -> str:
 # -------------------------------------------------------
 @app.get("/imgproxy/{image_url:path}")
 async def imgproxy(image_url: str, request: Request):
-    image_url = image_url.replace("https%3A//", "https://").replace("http%3A//", "http://")
+    # 【変更・追加】広告ドメインの画像が直接指定された場合は 404 を返して弾く
+    for ad_domain in AD_DOMAINS:
+        if ad_domain in image_url:
+            return Response(status_code=404, content=b"Blocked Ad Image")
+
+    image_url = image_url.replace("https%3A//", "https://").replace(
+        "http%3A//", "http://"
+    )
     if not image_url.startswith("http"):
         image_url = "https://" + image_url
 
     proxy_headers = {
         "User-Agent": request.headers.get("user-agent", "Mozilla/5.0"),
-        "Accept":     request.headers.get("accept", "image/webp,image/*,*/*"),
-        "Referer":    ORIGIN + "/",
+        "Accept": request.headers.get("accept", "image/webp,image/*,*/*"),
+        "Referer": ORIGIN + "/",
     }
 
     try:
         res = await core.http_client.get(image_url, headers=proxy_headers)
-        res_headers = {k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS}
+        res_headers = {
+            k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS
+        }
         res_headers["Access-Control-Allow-Origin"] = "*"
         res_headers["Cache-Control"] = "public, max-age=86400"
         return Response(
@@ -196,7 +251,9 @@ async def imgproxy(image_url: str, request: Request):
 # /{full_path}  — 汎用リバースプロキシ
 #   HTML レスポンスの場合は画像 URL を /imgproxy/ 経由に書き換える。
 # -------------------------------------------------------
-@app.api_route("/{full_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
+@app.api_route(
+    "/{full_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"]
+)
 async def proxy(request: Request, full_path: str):
     raw_path = request.scope.get("raw_path", b"").decode("utf-8", errors="replace")
     url = f"{ORIGIN}{raw_path}"
@@ -207,25 +264,35 @@ async def proxy(request: Request, full_path: str):
     client_referer = request.headers.get("referer", "")
     if client_referer:
         client_host = request.headers.get("host", "")
-        fake_referer = client_referer.replace(f"https://{client_host}", ORIGIN).replace(f"http://{client_host}", ORIGIN)
+        fake_referer = client_referer.replace(f"https://{client_host}", ORIGIN).replace(
+            f"http://{client_host}", ORIGIN
+        )
     else:
         fake_referer = f"{ORIGIN}/"
 
     # 2. 相手サーバー（WAFやボット対策）をすり抜けるためのヘッダーを構築
     proxy_headers = {
-        "Host":              ORIGIN.replace("https://", "").replace("http://", ""),
-        "X-Forwarded-Host":  request.headers.get("host", ""),
+        "Host": ORIGIN.replace("https://", "").replace("http://", ""),
+        "X-Forwarded-Host": request.headers.get("host", ""),
         "X-Forwarded-Proto": "https",
-        "User-Agent":        request.headers.get("user-agent", "Mozilla/5.0"),
-        "Accept":            request.headers.get("accept", "*/*"),
-        "Accept-Language":   request.headers.get("accept-language", "ja,en-US;q=0.9,en;q=0.8"),
-        "Cookie":            request.headers.get("cookie", ""),
-        "Referer":           fake_referer,
-        "Origin":            ORIGIN,
+        "User-Agent": request.headers.get("user-agent", "Mozilla/5.0"),
+        "Accept": request.headers.get("accept", "*/*"),
+        "Accept-Language": request.headers.get(
+            "accept-language", "ja,en-US;q=0.9,en;q=0.8"
+        ),
+        "Cookie": request.headers.get("cookie", ""),
+        "Referer": fake_referer,
+        "Origin": ORIGIN,
     }
 
     # 3. POST通信やAjax(非同期通信)に必要なヘッダーがあればそのまま転送する
-    for header_name in ["content-type", "x-requested-with", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"]:
+    for header_name in [
+        "content-type",
+        "x-requested-with",
+        "sec-fetch-dest",
+        "sec-fetch-mode",
+        "sec-fetch-site",
+    ]:
         if header_name in request.headers:
             proxy_headers[header_name.title()] = request.headers[header_name]
 
@@ -242,7 +309,9 @@ async def proxy(request: Request, full_path: str):
         )
 
         content_type = res.headers.get("content-type", "")
-        res_headers = {k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS}
+        res_headers = {
+            k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS
+        }
         res_headers["Access-Control-Allow-Origin"] = "*"
         res_headers["Access-Control-Allow-Credentials"] = "true"
 
@@ -275,4 +344,5 @@ async def proxy(request: Request, full_path: str):
 # -------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
