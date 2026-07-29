@@ -9,11 +9,22 @@ from fastapi.middleware.cors import CORSMiddleware
 # 【マルチサイト設定】
 # -------------------------------------------------------
 SITES = {
-    "soraraw": "https://soraraw.com",
     "mangarw": "https://mangarw.com",
+    "soraraw": "https://soraraw.com",
 }
 
-DEFAULT_SITE = "soraraw"
+DEFAULT_SITE = "mangarw"
+
+# -------------------------------------------------------
+# 【ホスト名・ドメイン自動判定設定】
+# アクセスされたドメイン名（例: mangaraw.onrender.com）
+# に含まれる文字列に応じて、自動でターゲットサイトを切り替えます。
+# -------------------------------------------------------
+HOST_MAPPINGS = {
+    "mangaraw": "mangarw",
+    "mangarw": "mangarw",
+    "soraraw": "soraraw",
+}
 
 # -------------------------------------------------------
 # 広告・リダイレクト用ドメインリスト
@@ -278,24 +289,43 @@ async def imgproxy(image_url: str, request: Request):
 
 
 # -------------------------------------------------------
-# /{raw_path}  — 汎用リバースプロキシ (Cloudflare回避ヘッダー)
+# /{raw_path}  — 汎用リバースプロキシ (ホスト名自動判定機能付き)
 # -------------------------------------------------------
 @app.api_route("/{raw_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def proxy(request: Request, raw_path: str):
-    segments = raw_path.lstrip("/").split("/", 1)
-    first_seg = segments[0]
+    host = request.headers.get("host", "").lower()
 
-    if first_seg in SITES:
-        site_key = first_seg
-        target_path = "/" + segments[1] if len(segments) > 1 else "/"
+    # 1. ホスト名（ドメイン）からターゲットサイトを自動判定
+    matched_site_key = None
+    for sub, site_k in HOST_MAPPINGS.items():
+        if sub in host:
+            matched_site_key = site_k
+            break
+
+    segments = raw_path.lstrip("/").split("/", 1)
+    first_seg = segments[0] if segments else ""
+
+    if matched_site_key:
+        # ドメイン名に mangaraw などが含まれている場合 (例: mangaraw.onrender.com)
+        if first_seg in SITES:
+            site_key = first_seg
+            target_path = "/" + segments[1] if len(segments) > 1 else "/"
+        else:
+            site_key = matched_site_key
+            target_path = "/" + raw_path if raw_path else "/"
     else:
-        site_key = DEFAULT_SITE
-        client_referer = request.headers.get("referer", "")
-        for key in SITES:
-            if f"/{key}/" in client_referer or client_referer.endswith(f"/{key}"):
-                site_key = key
-                break
-        target_path = "/" + raw_path if raw_path else "/"
+        # ドメイン名で判定できない場合
+        if first_seg in SITES:
+            site_key = first_seg
+            target_path = "/" + segments[1] if len(segments) > 1 else "/"
+        else:
+            site_key = DEFAULT_SITE
+            client_referer = request.headers.get("referer", "")
+            for key in SITES:
+                if f"/{key}/" in client_referer or client_referer.endswith(f"/{key}"):
+                    site_key = key
+                    break
+            target_path = "/" + raw_path if raw_path else "/"
 
     origin = SITES[site_key]
     url = f"{origin}{target_path}"
@@ -314,7 +344,6 @@ async def proxy(request: Request, raw_path: str):
     else:
         fake_referer = f"{origin}/"
 
-    # Cloudflareにボット判定されないChromeブラウザ完全偽装ヘッダー
     proxy_headers = {
         "Host": origin.replace("https://", "").replace("http://", ""),
         "User-Agent": request.headers.get("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
