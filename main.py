@@ -4,12 +4,14 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 # -------------------------------------------------------
 # 【マルチサイト設定】見たいサイトをここに追加
 # -------------------------------------------------------
 SITES = {
     "mangarw": "https://mangarw.com",
+    "soraraw": "https://soraraw.com",
     # "site2": "https://example.com", 
 }
 
@@ -273,6 +275,13 @@ async def imgproxy(image_url: str, request: Request):
         return Response(status_code=502, content=b"imgproxy failed")
 
 # -------------------------------------------------------
+# ルートパスをデフォルトサイトにリダイレクト
+# -------------------------------------------------------
+@app.get("/")
+async def root():
+    return RedirectResponse(url=f"/{DEFAULT_SITE}/")
+
+# -------------------------------------------------------
 # /{raw_path}  — 汎用リバースプロキシ
 # -------------------------------------------------------
 @app.api_route("/{raw_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
@@ -367,4 +376,4 @@ async def proxy(request: Request, raw_path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run("main_fixed:app", host="0.0.0.0", port=8080, reload=True)
