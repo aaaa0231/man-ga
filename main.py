@@ -6,11 +6,11 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 # -------------------------------------------------------
-# 【マルチサイト設定】
+# 【マルチサイト設定】見たいサイトをここに追加
 # -------------------------------------------------------
 SITES = {
     "mangarw": "https://mangarw.com",
-    # 他に見たいサイトがあれば追加できます
+    # "site2": "https://example.com", 
 }
 
 DEFAULT_SITE = "mangarw"
@@ -27,23 +27,19 @@ AD_DOMAINS = [
     "vntsm.com",
 ]
 
-
 # -------------------------------------------------------
 # アプリ起動 / 終了時に httpx クライアントを管理
 # -------------------------------------------------------
 class Core:
     http_client: httpx.AsyncClient | None = None
 
-
 core = Core()
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
     yield
     await core.http_client.aclose()
-
 
 app = FastAPI(lifespan=lifespan)
 
@@ -63,84 +59,85 @@ _SKIP_HEADERS = {
 }
 
 # -------------------------------------------------------
-# 強力な「リダイレクト・ポップアップ阻止スクリプト」の注入
+# 最新・最強版「リダイレクト阻止 ＆ 広告強制非表示スクリプト」
 # -------------------------------------------------------
 ANTI_REDIRECT_SCRIPT = """
+<style>
+/* CSSレベルで広告要素・バナー・透明オーバーレイを強制消去 */
+[class*="ad-"], [class*="ad_"], [id*="ad-"], [id*="ad_"],
+[class*="banner"], [id*="banner"], [class*="pop-"], [class*="popup"],
+div[style*="z-index: 2147483647"], div[style*="z-index: 99999"],
+iframe[src*="about:blank"], iframe:not([src]) {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+}
+</style>
 <script>
 (function() {
     'use strict';
 
-    // 1. window.open (ポップアップ・別タブ) を完全停止
-    window.open = function(url, target, features) {
-        console.warn('[Anti-Ad] Blocked window.open:', url);
-        return null;
+    // 1. window.open (別タブ・ポップアップ) の完全無効化
+    window.open = function() { return null; };
+
+    // 2. 動的な <script> タグの生成を監視し、不審な外部スクリプトの差し込みを防止
+    const originalCreateElement = document.createElement.bind(document);
+    document.createElement = function(tagName, options) {
+        const el = originalCreateElement(tagName, options);
+        if (tagName.toLowerCase() === 'script') {
+            const originalSetAttribute = el.setAttribute.bind(el);
+            el.setAttribute = function(name, value) {
+                if (name.toLowerCase() === 'src') {
+                    // ドメインが異なる不審なスクリプト読み込みを拒否
+                    if (value.includes('http') && !value.includes(location.host)) {
+                        console.warn('[Anti-Ad] Blocked dynamic script:', value);
+                        return;
+                    }
+                }
+                return originalSetAttribute(name, value);
+            };
+        }
+        return el;
     };
 
-    // 2. target="_blank" (別タブ遷移) をすべて削除
-    function removeTargetBlank() {
-        document.querySelectorAll('a[target]').forEach(a => {
-            if (a.getAttribute('target') === '_blank') {
-                a.removeAttribute('target');
-            }
-        });
-    }
-
-    // 3. 画面全体を覆う「透明な広告要素 (クリックジャック)」を全自動削除
-    function removeClickjackOverlays() {
-        const elements = document.querySelectorAll('div, a, span, section');
-        const screenWidth = window.innerWidth;
-        const screenHeight = window.innerHeight;
-
-        elements.forEach(el => {
+    // 3. target="_blank" の削除 ＆ 画面を覆う透明レイヤーの即時削除
+    function cleanUp() {
+        document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
+        
+        // 画面全体を覆う透明な広告オーバーレイを検出して削除
+        document.querySelectorAll('div, section, a').forEach(el => {
             const style = window.getComputedStyle(el);
-            const isFixedOrAbs = style.position === 'fixed' || style.position === 'absolute';
-            const highZIndex = parseInt(style.zIndex) > 10 || style.zIndex === '9999' || style.zIndex === '2147483647';
-            
-            // 画面の広範囲（70%以上）を覆っている要素を判定
-            const rect = el.getBoundingClientRect();
-            const isFullCover = rect.width >= screenWidth * 0.7 && rect.height >= screenHeight * 0.7;
-
-            if (isFixedOrAbs && highZIndex && isFullCover) {
-                // 画像が含まれていない（透明な罠）場合は物理削除
-                if (!el.querySelector('img') && !el.querySelector('canvas')) {
-                    console.warn('[Anti-Ad] Removed clickjack overlay:', el);
-                    el.remove();
-                }
+            if ((style.position === 'fixed' || style.position === 'absolute') &&
+                (parseInt(style.zIndex) > 1000) &&
+                !el.querySelector('img') && !el.querySelector('video')) {
+                el.remove();
             }
         });
     }
 
-    // 4. クリックイベントの横取り（ポップアンダー・勝手なページ移動）をブロック
+    // イベントジャック（クリック横取り）防止
     document.addEventListener('click', function(e) {
         let target = e.target;
         while (target && target !== document.body) {
-            if (target.tagName === 'A') {
-                const href = target.getAttribute('href') || '';
-                // onclick 属性に悪質な処理が入っている場合は無効化
-                if (target.getAttribute('onclick')) {
-                    target.removeAttribute('onclick');
-                }
+            if (target.tagName === 'A' && target.getAttribute('onclick')) {
+                target.removeAttribute('onclick');
                 break;
             }
             target = target.parentElement;
         }
-    }, true); // キャプチャフェーズで最優先実行
+    }, true);
 
-    // 定期監視して後から生成される広告トラップも消去
     document.addEventListener('DOMContentLoaded', () => {
-        removeTargetBlank();
-        removeClickjackOverlays();
-        setInterval(() => {
-            removeTargetBlank();
-            removeClickjackOverlays();
-        }, 800);
+        cleanUp();
+        setInterval(cleanUp, 500); // 0.5秒ごとに追跡削除
     });
 })();
 </script>
 """
 
 # -------------------------------------------------------
-# 画像 URL を /imgproxy/ 経由に書き換える
+# 画像 URL を /imgproxy/ 経由に書き換える処理
 # -------------------------------------------------------
 _IMG_EXT_RE = re.compile(
     r'https?://[^\s"\')\]>]+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)(?:[?#][^\s"\')\]>]*)?',
@@ -152,23 +149,20 @@ _CSS_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 def _to_imgproxy(url: str) -> str:
     if "/imgproxy/" in url:
         return url
+    # 広告ドメインの画像は読み込まずに無効化
     for ad_domain in AD_DOMAINS:
         if ad_domain in url:
             return "about:blank"
     stripped = re.sub(r"^https?://", "", url)
     return f"/imgproxy/{stripped}"
 
-
 def _rewrite_srcset(srcset: str) -> str:
     def replace_url(m: re.Match) -> str:
         return _to_imgproxy(m.group(1))
-
     return _SRCSET_ENTRY_RE.sub(replace_url, srcset)
-
 
 # -------------------------------------------------------
 # 広告・リダイレクトコード除去処理
@@ -181,10 +175,10 @@ def remove_ads(html: str) -> str:
         html = re.sub(r"<iframe[^>]*" + escaped + r"[^>]*>.*?</iframe>", "", html, flags=re.IGNORECASE | re.DOTALL)
         html = re.sub(r"<a[^>]*" + escaped + r"[^>]*>.*?</a>", "", html, flags=re.IGNORECASE | re.DOTALL)
 
-    # 2. onclick 属性に入っているリダイレクト命令（window.open等）を強力削除
+    # 2. onclick 属性に入っているリダイレクト命令を強力削除
     html = re.sub(r'onclick=["\'][^"\']*(?:window\.open|location\.href)[^"\']*["\']', '', html, flags=re.IGNORECASE)
 
-    # 3. リダイレクト阻止スクリプトを <head> 直後に注入
+    # 3. 最新版のリダイレクト阻止＆CSS隠蔽スクリプトを注入
     if "<head>" in html:
         html = html.replace("<head>", f"<head>{ANTI_REDIRECT_SCRIPT}", 1)
     elif "<HEAD>" in html:
@@ -193,7 +187,6 @@ def remove_ads(html: str) -> str:
         html = ANTI_REDIRECT_SCRIPT + html
 
     return html
-
 
 # -------------------------------------------------------
 # URL・リンク書き換え処理
@@ -212,7 +205,6 @@ def rewrite_site_links(html: str, site_key: str, origin: str) -> str:
 
     html = re.sub(r'href=(["\'])(/[^"\']*)\1', rewrite_href, html, flags=re.IGNORECASE)
     return html
-
 
 def rewrite_img_urls(html: str) -> str:
     def rewrite_src(m: re.Match) -> str:
@@ -239,12 +231,12 @@ def rewrite_img_urls(html: str) -> str:
     html = _CSS_URL_RE.sub(rewrite_css_url, html)
     return html
 
-
 # -------------------------------------------------------
 # /imgproxy/{image_url}  — 画像リバースプロキシ
 # -------------------------------------------------------
 @app.get("/imgproxy/{image_url:path}")
 async def imgproxy(image_url: str, request: Request):
+    # 広告ドメインの画像を弾く
     for ad_domain in AD_DOMAINS:
         if ad_domain in image_url:
             return Response(status_code=404, content=b"Blocked Ad Image")
@@ -279,7 +271,6 @@ async def imgproxy(image_url: str, request: Request):
     except Exception as e:
         print(f"imgproxy error: {e}")
         return Response(status_code=502, content=b"imgproxy failed")
-
 
 # -------------------------------------------------------
 # /{raw_path}  — 汎用リバースプロキシ
@@ -374,8 +365,6 @@ async def proxy(request: Request, raw_path: str):
         print(f"Proxy error: {e}")
         return Response(status_code=502, content=b"Worker connection failed")
 
-
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
