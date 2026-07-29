@@ -6,14 +6,14 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 # -------------------------------------------------------
-# 【マルチサイト設定】見たいサイトをここに追加
+# 【マルチサイト設定】
 # -------------------------------------------------------
 SITES = {
+    "soraraw": "https://soraraw.com",
     "mangarw": "https://mangarw.com",
-     "test": "https://soraraw.com/", 
 }
 
-DEFAULT_SITE = "mangarw"
+DEFAULT_SITE = "soraraw"
 
 # -------------------------------------------------------
 # 広告・リダイレクト用ドメインリスト
@@ -27,19 +27,24 @@ AD_DOMAINS = [
     "vntsm.com",
 ]
 
+
 # -------------------------------------------------------
-# アプリ起動 / 終了時に httpx クライアントを管理
+# アプリ起動 / 終了時に httpx クライアントを管理 (HTTP/2対応)
 # -------------------------------------------------------
 class Core:
     http_client: httpx.AsyncClient | None = None
 
+
 core = Core()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+    # Cloudflare 対策として http2=True を有効化
+    core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True, http2=True)
     yield
     await core.http_client.aclose()
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -59,7 +64,7 @@ _SKIP_HEADERS = {
 }
 
 # -------------------------------------------------------
-# 最新・最強版「リダイレクト阻止 ＆ 広告強制非表示スクリプト」
+# リダイレクト阻止 ＆ 広告強制非表示スクリプト
 # -------------------------------------------------------
 ANTI_REDIRECT_SCRIPT = """
 <style>
@@ -81,7 +86,7 @@ iframe[src*="about:blank"], iframe:not([src]) {
     // 1. window.open (別タブ・ポップアップ) の完全無効化
     window.open = function() { return null; };
 
-    // 2. 動的な <script> タグの生成を監視し、不審な外部スクリプトの差し込みを防止
+    // 2. 動的な <script> タグの生成を監視
     const originalCreateElement = document.createElement.bind(document);
     document.createElement = function(tagName, options) {
         const el = originalCreateElement(tagName, options);
@@ -89,7 +94,6 @@ iframe[src*="about:blank"], iframe:not([src]) {
             const originalSetAttribute = el.setAttribute.bind(el);
             el.setAttribute = function(name, value) {
                 if (name.toLowerCase() === 'src') {
-                    // ドメインが異なる不審なスクリプト読み込みを拒否
                     if (value.includes('http') && !value.includes(location.host)) {
                         console.warn('[Anti-Ad] Blocked dynamic script:', value);
                         return;
@@ -105,7 +109,6 @@ iframe[src*="about:blank"], iframe:not([src]) {
     function cleanUp() {
         document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
         
-        // 画面全体を覆う透明な広告オーバーレイを検出して削除
         document.querySelectorAll('div, section, a').forEach(el => {
             const style = window.getComputedStyle(el);
             if ((style.position === 'fixed' || style.position === 'absolute') &&
@@ -116,7 +119,6 @@ iframe[src*="about:blank"], iframe:not([src]) {
         });
     }
 
-    // イベントジャック（クリック横取り）防止
     document.addEventListener('click', function(e) {
         let target = e.target;
         while (target && target !== document.body) {
@@ -130,7 +132,7 @@ iframe[src*="about:blank"], iframe:not([src]) {
 
     document.addEventListener('DOMContentLoaded', () => {
         cleanUp();
-        setInterval(cleanUp, 500); // 0.5秒ごとに追跡削除
+        setInterval(cleanUp, 500);
     });
 })();
 </script>
@@ -149,36 +151,36 @@ _CSS_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+
 def _to_imgproxy(url: str) -> str:
     if "/imgproxy/" in url:
         return url
-    # 広告ドメインの画像は読み込まずに無効化
     for ad_domain in AD_DOMAINS:
         if ad_domain in url:
             return "about:blank"
     stripped = re.sub(r"^https?://", "", url)
     return f"/imgproxy/{stripped}"
 
+
 def _rewrite_srcset(srcset: str) -> str:
     def replace_url(m: re.Match) -> str:
         return _to_imgproxy(m.group(1))
+
     return _SRCSET_ENTRY_RE.sub(replace_url, srcset)
+
 
 # -------------------------------------------------------
 # 広告・リダイレクトコード除去処理
 # -------------------------------------------------------
 def remove_ads(html: str) -> str:
-    # 1. 広告ドメインを含むタグの物理削除
     for domain in AD_DOMAINS:
         escaped = re.escape(domain)
         html = re.sub(r"<script[^>]*" + escaped + r"[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
         html = re.sub(r"<iframe[^>]*" + escaped + r"[^>]*>.*?</iframe>", "", html, flags=re.IGNORECASE | re.DOTALL)
         html = re.sub(r"<a[^>]*" + escaped + r"[^>]*>.*?</a>", "", html, flags=re.IGNORECASE | re.DOTALL)
 
-    # 2. onclick 属性に入っているリダイレクト命令を強力削除
     html = re.sub(r'onclick=["\'][^"\']*(?:window\.open|location\.href)[^"\']*["\']', '', html, flags=re.IGNORECASE)
 
-    # 3. 最新版のリダイレクト阻止＆CSS隠蔽スクリプトを注入
     if "<head>" in html:
         html = html.replace("<head>", f"<head>{ANTI_REDIRECT_SCRIPT}", 1)
     elif "<HEAD>" in html:
@@ -187,6 +189,7 @@ def remove_ads(html: str) -> str:
         html = ANTI_REDIRECT_SCRIPT + html
 
     return html
+
 
 # -------------------------------------------------------
 # URL・リンク書き換え処理
@@ -205,6 +208,7 @@ def rewrite_site_links(html: str, site_key: str, origin: str) -> str:
 
     html = re.sub(r'href=(["\'])(/[^"\']*)\1', rewrite_href, html, flags=re.IGNORECASE)
     return html
+
 
 def rewrite_img_urls(html: str) -> str:
     def rewrite_src(m: re.Match) -> str:
@@ -231,12 +235,12 @@ def rewrite_img_urls(html: str) -> str:
     html = _CSS_URL_RE.sub(rewrite_css_url, html)
     return html
 
+
 # -------------------------------------------------------
 # /imgproxy/{image_url}  — 画像リバースプロキシ
 # -------------------------------------------------------
 @app.get("/imgproxy/{image_url:path}")
 async def imgproxy(image_url: str, request: Request):
-    # 広告ドメインの画像を弾く
     for ad_domain in AD_DOMAINS:
         if ad_domain in image_url:
             return Response(status_code=404, content=b"Blocked Ad Image")
@@ -252,8 +256,8 @@ async def imgproxy(image_url: str, request: Request):
             break
 
     proxy_headers = {
-        "User-Agent": request.headers.get("user-agent", "Mozilla/5.0"),
-        "Accept": request.headers.get("accept", "image/webp,image/*,*/*"),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
         "Referer": referer,
     }
 
@@ -272,8 +276,9 @@ async def imgproxy(image_url: str, request: Request):
         print(f"imgproxy error: {e}")
         return Response(status_code=502, content=b"imgproxy failed")
 
+
 # -------------------------------------------------------
-# /{raw_path}  — 汎用リバースプロキシ
+# /{raw_path}  — 汎用リバースプロキシ (Cloudflare回避ヘッダー)
 # -------------------------------------------------------
 @app.api_route("/{raw_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def proxy(request: Request, raw_path: str):
@@ -309,21 +314,27 @@ async def proxy(request: Request, raw_path: str):
     else:
         fake_referer = f"{origin}/"
 
+    # Cloudflareにボット判定されないChromeブラウザ完全偽装ヘッダー
     proxy_headers = {
         "Host": origin.replace("https://", "").replace("http://", ""),
-        "X-Forwarded-Host": request.headers.get("host", ""),
-        "X-Forwarded-Proto": "https",
-        "User-Agent": request.headers.get("user-agent", "Mozilla/5.0"),
-        "Accept": request.headers.get("accept", "*/*"),
-        "Accept-Language": request.headers.get("accept-language", "ja,en-US;q=0.9,en;q=0.8"),
+        "User-Agent": request.headers.get("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": request.headers.get("accept-language", "ja,ja-JP;q=0.9,en-US;q=0.8,en;q=0.7"),
         "Cookie": request.headers.get("cookie", ""),
         "Referer": fake_referer,
-        "Origin": origin,
+        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Upgrade-Insecure-Requests": "1",
     }
 
-    for header_name in ["content-type", "x-requested-with", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"]:
-        if header_name in request.headers:
-            proxy_headers[header_name.title()] = request.headers[header_name]
+    if request.method != "GET":
+        proxy_headers["Origin"] = origin
+
+    proxy_headers = {k: v for k, v in proxy_headers.items() if v}
 
     body = None
     if request.method not in ("GET", "HEAD"):
@@ -365,6 +376,8 @@ async def proxy(request: Request, raw_path: str):
         print(f"Proxy error: {e}")
         return Response(status_code=502, content=b"Worker connection failed")
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
