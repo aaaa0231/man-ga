@@ -17,8 +17,6 @@ DEFAULT_SITE = "mangarw"
 
 # -------------------------------------------------------
 # 【ホスト名・ドメイン自動判定設定】
-# アクセスされたドメイン名（例: mangaraw.onrender.com）
-# に含まれる文字列に応じて、自動でターゲットサイトを切り替えます。
 # -------------------------------------------------------
 HOST_MAPPINGS = {
     "mangaraw": "mangarw",
@@ -38,16 +36,13 @@ AD_DOMAINS = [
     "vntsm.com",
 ]
 
-
 # -------------------------------------------------------
 # アプリ起動 / 終了時に httpx クライアントを管理 (HTTP/2対応)
 # -------------------------------------------------------
 class Core:
     http_client: httpx.AsyncClient | None = None
 
-
 core = Core()
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -55,7 +50,6 @@ async def lifespan(app: FastAPI):
     core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True, http2=True)
     yield
     await core.http_client.aclose()
-
 
 app = FastAPI(lifespan=lifespan)
 
@@ -79,11 +73,11 @@ _SKIP_HEADERS = {
 # -------------------------------------------------------
 ANTI_REDIRECT_SCRIPT = """
 <style>
-/* CSSレベルで広告要素・バナー・透明オーバーレイを強制消去 */
+/* 広告要素・バナーを強制消去 */
 [class*="ad-"], [class*="ad_"], [id*="ad-"], [id*="ad_"],
 [class*="banner"], [id*="banner"], [class*="pop-"], [class*="popup"],
 div[style*="z-index: 2147483647"], div[style*="z-index: 99999"],
-iframe[src*="about:blank"], iframe:not([src]) {
+iframe[src*="about:blank"] {
     display: none !important;
     visibility: hidden !important;
     opacity: 0 !important;
@@ -94,10 +88,10 @@ iframe[src*="about:blank"], iframe:not([src]) {
 (function() {
     'use strict';
 
-    // 1. window.open (別タブ・ポップアップ) の完全無効化
+    // 1. window.open の完全無効化
     window.open = function() { return null; };
 
-    // 2. 動的な <script> タグの生成を監視
+    // 2. 動的な不審スクリプト生成を監視
     const originalCreateElement = document.createElement.bind(document);
     document.createElement = function(tagName, options) {
         const el = originalCreateElement(tagName, options);
@@ -116,7 +110,7 @@ iframe[src*="about:blank"], iframe:not([src]) {
         return el;
     };
 
-    // 3. target="_blank" の削除 ＆ 画面を覆う透明レイヤーの即時削除
+    // 3. 画面全体を覆う透明レイヤー広告"のみ"を削除（漫画のUI誤爆防止のためサイズで判定）
     function cleanUp() {
         document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
         
@@ -124,16 +118,20 @@ iframe[src*="about:blank"], iframe:not([src]) {
             const style = window.getComputedStyle(el);
             if ((style.position === 'fixed' || style.position === 'absolute') &&
                 (parseInt(style.zIndex) > 1000) &&
+                (el.offsetWidth > window.innerWidth * 0.8) && 
+                (el.offsetHeight > window.innerHeight * 0.8) && 
                 !el.querySelector('img') && !el.querySelector('video')) {
                 el.remove();
             }
         });
     }
 
+    // イベントジャック防止
     document.addEventListener('click', function(e) {
         let target = e.target;
         while (target && target !== document.body) {
             if (target.tagName === 'A' && target.getAttribute('onclick')) {
+                // リンクとしての遷移は残しつつ onclick によるリダイレクトだけ消去
                 target.removeAttribute('onclick');
                 break;
             }
@@ -143,7 +141,7 @@ iframe[src*="about:blank"], iframe:not([src]) {
 
     document.addEventListener('DOMContentLoaded', () => {
         cleanUp();
-        setInterval(cleanUp, 500);
+        setInterval(cleanUp, 1000);
     });
 })();
 </script>
@@ -153,7 +151,7 @@ iframe[src*="about:blank"], iframe:not([src]) {
 # 画像 URL を /imgproxy/ 経由に書き換える処理
 # -------------------------------------------------------
 _IMG_EXT_RE = re.compile(
-    r'https?://[^\s"\')\]>]+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)(?:[?#][^\s"\')\]>]*)?',
+    r'https?://[^\s"\')\]\\]+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)(?:[?#][^\s"\')\]\\]*)?',
     re.IGNORECASE,
 )
 _SRCSET_ENTRY_RE = re.compile(r"(https?://[^\s,]+)", re.IGNORECASE)
@@ -161,7 +159,6 @@ _CSS_URL_RE = re.compile(
     r'url\(\s*(["\']?)(https?://[^\s"\')\]>]+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\')\]>]*)\1\s*\)',
     re.IGNORECASE,
 )
-
 
 def _to_imgproxy(url: str) -> str:
     if "/imgproxy/" in url:
@@ -172,13 +169,10 @@ def _to_imgproxy(url: str) -> str:
     stripped = re.sub(r"^https?://", "", url)
     return f"/imgproxy/{stripped}"
 
-
 def _rewrite_srcset(srcset: str) -> str:
     def replace_url(m: re.Match) -> str:
         return _to_imgproxy(m.group(1))
-
     return _SRCSET_ENTRY_RE.sub(replace_url, srcset)
-
 
 # -------------------------------------------------------
 # 広告・リダイレクトコード除去処理
@@ -201,7 +195,6 @@ def remove_ads(html: str) -> str:
 
     return html
 
-
 # -------------------------------------------------------
 # URL・リンク書き換え処理
 # -------------------------------------------------------
@@ -220,7 +213,6 @@ def rewrite_site_links(html: str, site_key: str, origin: str) -> str:
     html = re.sub(r'href=(["\'])(/[^"\']*)\1', rewrite_href, html, flags=re.IGNORECASE)
     return html
 
-
 def rewrite_img_urls(html: str) -> str:
     def rewrite_src(m: re.Match) -> str:
         attr, quote, url = m.group(1), m.group(2), m.group(3)
@@ -228,8 +220,10 @@ def rewrite_img_urls(html: str) -> str:
             return m.group(0)
         return f"{attr}={quote}{_to_imgproxy(url)}{quote}"
 
+    # 通常の src 属性
     html = re.sub(r'(src)=(["\'])(https?://[^\s"\']+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\']*)\2', rewrite_src, html, flags=re.IGNORECASE)
-    html = re.sub(r'(data-(?:src|lazy-src|original|bg))=(["\'])(https?://[^\s"\']+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\']*)\2', rewrite_src, html, flags=re.IGNORECASE)
+    # 【変更点】data-src だけでなく、あらゆる data-〇〇 属性の画像URLに対応（特殊な遅延読み込み対策）
+    html = re.sub(r'(data-[a-zA-Z0-9_-]+)=(["\'])(https?://[^\s"\']+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\']*)\2', rewrite_src, html, flags=re.IGNORECASE)
 
     def rewrite_srcset_attr(m: re.Match) -> str:
         attr, quote, val = m.group(1), m.group(2), m.group(3)
@@ -245,7 +239,6 @@ def rewrite_img_urls(html: str) -> str:
 
     html = _CSS_URL_RE.sub(rewrite_css_url, html)
     return html
-
 
 # -------------------------------------------------------
 # /imgproxy/{image_url}  — 画像リバースプロキシ
@@ -287,7 +280,6 @@ async def imgproxy(image_url: str, request: Request):
         print(f"imgproxy error: {e}")
         return Response(status_code=502, content=b"imgproxy failed")
 
-
 # -------------------------------------------------------
 # /{raw_path}  — 汎用リバースプロキシ (ホスト名自動判定機能付き)
 # -------------------------------------------------------
@@ -295,7 +287,6 @@ async def imgproxy(image_url: str, request: Request):
 async def proxy(request: Request, raw_path: str):
     host = request.headers.get("host", "").lower()
 
-    # 1. ホスト名（ドメイン）からターゲットサイトを自動判定
     matched_site_key = None
     for sub, site_k in HOST_MAPPINGS.items():
         if sub in host:
@@ -306,7 +297,6 @@ async def proxy(request: Request, raw_path: str):
     first_seg = segments[0] if segments else ""
 
     if matched_site_key:
-        # ドメイン名に mangaraw などが含まれている場合 (例: mangaraw.onrender.com)
         if first_seg in SITES:
             site_key = first_seg
             target_path = "/" + segments[1] if len(segments) > 1 else "/"
@@ -314,7 +304,6 @@ async def proxy(request: Request, raw_path: str):
             site_key = matched_site_key
             target_path = "/" + raw_path if raw_path else "/"
     else:
-        # ドメイン名で判定できない場合
         if first_seg in SITES:
             site_key = first_seg
             target_path = "/" + segments[1] if len(segments) > 1 else "/"
@@ -354,9 +343,9 @@ async def proxy(request: Request, raw_path: str):
         "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
         "Sec-Ch-Ua-Mobile": "?0",
         "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Dest": request.headers.get("sec-fetch-dest", "document"),
+        "Sec-Fetch-Mode": request.headers.get("sec-fetch-mode", "navigate"),
+        "Sec-Fetch-Site": request.headers.get("sec-fetch-site", "same-origin"),
         "Upgrade-Insecure-Requests": "1",
     }
 
@@ -382,6 +371,7 @@ async def proxy(request: Request, raw_path: str):
         res_headers["Access-Control-Allow-Origin"] = "*"
         res_headers["Access-Control-Allow-Credentials"] = "true"
 
+        # HTMLページの処理
         if "text/html" in content_type:
             html = res.text
             html = remove_ads(html)
@@ -393,7 +383,26 @@ async def proxy(request: Request, raw_path: str):
                 headers=res_headers,
                 media_type=content_type,
             )
+        
+        # 【追加】JSON/JSデータの処理 (続きの画像を裏側で読み込むAPI通信に対応)
+        elif "application/json" in content_type or "text/javascript" in content_type:
+            text = res.text
+            # JSONやJS内に含まれる画像URLをすべてプロキシ経由に書き換え
+            def replace_json_img(m: re.Match) -> str:
+                # エスケープ文字(\/)が含まれている場合を考慮
+                clean_url = m.group(0).replace("\\/", "/")
+                return _to_imgproxy(clean_url)
+                
+            text = _IMG_EXT_RE.sub(replace_json_img, text)
+            
+            return Response(
+                content=text.encode("utf-8"),
+                status_code=res.status_code,
+                headers=res_headers,
+                media_type=content_type,
+            )
 
+        # その他のファイル（画像などそのまま流す）
         return Response(
             content=res.content,
             status_code=res.status_code,
@@ -405,8 +414,6 @@ async def proxy(request: Request, raw_path: str):
         print(f"Proxy error: {e}")
         return Response(status_code=502, content=b"Worker connection failed")
 
-
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
