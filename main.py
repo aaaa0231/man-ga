@@ -1,7 +1,7 @@
 import re
 from contextlib import asynccontextmanager
 
-from curl_cffi.requests import AsyncSession
+import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -29,10 +29,10 @@ AD_DOMAINS = [
 
 
 # -------------------------------------------------------
-# アプリ起動 / 終了時に curl-cffi (Chrome偽装) クライアントを管理
+# アプリ起動 / 終了時に httpx クライアントを管理 (HTTP/2対応)
 # -------------------------------------------------------
 class Core:
-    http_client: AsyncSession | None = None
+    http_client: httpx.AsyncClient | None = None
 
 
 core = Core()
@@ -40,10 +40,10 @@ core = Core()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # impersonate="chrome120" で TLS フィンガープリントレベルで Chrome に完全偽装
-    core.http_client = AsyncSession(impersonate="chrome120", timeout=30.0)
+    # Cloudflare 対策として http2=True を有効化
+    core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True, http2=True)
     yield
-    await core.http_client.close()
+    await core.http_client.aclose()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -105,19 +105,12 @@ iframe[src*="about:blank"], iframe:not([src]) {
         return el;
     };
 
-    // 3. target="_blank" の削除 ＆ 画面を覆う透明レイヤーの削除（エラーメッセージ類は除外）
+    // 3. target="_blank" の削除 ＆ 画面を覆う透明レイヤーの即時削除
     function cleanUp() {
         document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
         
         document.querySelectorAll('div, section, a').forEach(el => {
             const style = window.getComputedStyle(el);
-            const text = el.innerText || '';
-            
-            // エラー表示やシステムメッセージは削除対象から外す
-            if (text.includes('問題が発生') || text.includes('Cloudflare') || text.includes('Verify')) {
-                return;
-            }
-
             if ((style.position === 'fixed' || style.position === 'absolute') &&
                 (parseInt(style.zIndex) > 1000) &&
                 !el.querySelector('img') && !el.querySelector('video')) {
@@ -139,7 +132,7 @@ iframe[src*="about:blank"], iframe:not([src]) {
 
     document.addEventListener('DOMContentLoaded', () => {
         cleanUp();
-        setInterval(cleanUp, 800);
+        setInterval(cleanUp, 500);
     });
 })();
 </script>
@@ -269,7 +262,7 @@ async def imgproxy(image_url: str, request: Request):
     }
 
     try:
-        res = await core.http_client.get(image_url, headers=proxy_headers, allow_redirects=True)
+        res = await core.http_client.get(image_url, headers=proxy_headers)
         res_headers = {k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS}
         res_headers["Access-Control-Allow-Origin"] = "*"
         res_headers["Cache-Control"] = "public, max-age=86400"
@@ -285,7 +278,7 @@ async def imgproxy(image_url: str, request: Request):
 
 
 # -------------------------------------------------------
-# /{raw_path}  — 汎用リバースプロキシ (curl-cffi 偽装対応)
+# /{raw_path}  — 汎用リバースプロキシ (Cloudflare回避ヘッダー)
 # -------------------------------------------------------
 @app.api_route("/{raw_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def proxy(request: Request, raw_path: str):
@@ -321,6 +314,7 @@ async def proxy(request: Request, raw_path: str):
     else:
         fake_referer = f"{origin}/"
 
+    # Cloudflareにボット判定されないChromeブラウザ完全偽装ヘッダー
     proxy_headers = {
         "Host": origin.replace("https://", "").replace("http://", ""),
         "User-Agent": request.headers.get("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
@@ -351,8 +345,7 @@ async def proxy(request: Request, raw_path: str):
             method=request.method,
             url=url,
             headers=proxy_headers,
-            data=body,
-            allow_redirects=True,
+            content=body,
         )
 
         content_type = res.headers.get("content-type", "")
