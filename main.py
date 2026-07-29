@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # -------------------------------------------------------
 SITES = {
     "mangarw": "https://mangarw.com",
-    # "test": "https://soraraw.com/", 
+     "test": "https://soraraw.com/", 
 }
 
 DEFAULT_SITE = "mangarw"
