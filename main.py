@@ -39,12 +39,10 @@ core = Core()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # follow_redirects=True だと無限リダイレクトループの可能性あり
-    # redirect_limit を制限して対応
     core.http_client = httpx.AsyncClient(
         timeout=30.0, 
         follow_redirects=True,
-        limits=httpx.Limits(max_redirects=10)
+        max_redirects=10
     )
     yield
     await core.http_client.aclose()
