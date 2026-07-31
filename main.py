@@ -39,11 +39,7 @@ core = Core()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    core.http_client = httpx.AsyncClient(
-        timeout=30.0, 
-        follow_redirects=True,
-        max_redirects=10
-    )
+    core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
     yield
     await core.http_client.aclose()
 
@@ -65,7 +61,7 @@ _SKIP_HEADERS = {
 }
 
 # -------------------------------------------------------
-# 最強版「リダイレクト阻止 ＆ 広告強制非表示スクリプト」
+# 最新・最強版「リダイレクト阻止 ＆ 広告強制非表示スクリプト」
 # -------------------------------------------------------
 ANTI_REDIRECT_SCRIPT = """
 <style>
@@ -84,39 +80,10 @@ iframe[src*="about:blank"], iframe:not([src]) {
 (function() {
     'use strict';
 
-    // ========== リダイレクト完全阻止 ==========
-    
-    // 1. location.href / location.replace / window.open の完全無効化
-    Object.defineProperty(window.location, 'href', {
-        get() { return window.location.toString(); },
-        set(value) { 
-            console.warn('[Anti-Redirect] Blocked location.href assignment:', value);
-            return false;
-        }
-    });
-    
-    window.location.replace = function(url) {
-        console.warn('[Anti-Redirect] Blocked location.replace:', url);
-        return false;
-    };
-    
-    window.location.assign = function(url) {
-        console.warn('[Anti-Redirect] Blocked location.assign:', url);
-        return false;
-    };
-    
-    window.open = function() { 
-        console.warn('[Anti-Redirect] Blocked window.open');
-        return null; 
-    };
+    // 1. window.open (別タブ・ポップアップ) の完全無効化
+    window.open = function() { return null; };
 
-    // 2. メタリフレッシュ <meta http-equiv="refresh"> 削除
-    document.querySelectorAll('meta[http-equiv="refresh"]').forEach(el => {
-        console.warn('[Anti-Redirect] Removed meta refresh:', el.getAttribute('content'));
-        el.remove();
-    });
-
-    // 3. 動的な <script> タグの生成を監視
+    // 2. 動的な <script> タグの生成を監視し、不審な外部スクリプトの差し込みを防止
     const originalCreateElement = document.createElement.bind(document);
     document.createElement = function(tagName, options) {
         const el = originalCreateElement(tagName, options);
@@ -124,8 +91,9 @@ iframe[src*="about:blank"], iframe:not([src]) {
             const originalSetAttribute = el.setAttribute.bind(el);
             el.setAttribute = function(name, value) {
                 if (name.toLowerCase() === 'src') {
+                    // ドメインが異なる不審なスクリプト読み込みを拒否
                     if (value.includes('http') && !value.includes(location.host)) {
-                        console.warn('[Anti-Redirect] Blocked external script:', value);
+                        console.warn('[Anti-Ad] Blocked dynamic script:', value);
                         return;
                     }
                 }
@@ -135,26 +103,12 @@ iframe[src*="about:blank"], iframe:not([src]) {
         return el;
     };
 
-    // 4. onload / onmouseover などのイベントハンドラからのリダイレクト削除
-    document.addEventListener('mouseover', function(e) {
-        if (e.target.onmouseover) {
-            const code = e.target.onmouseover.toString();
-            if (code.includes('location') || code.includes('window.open')) {
-                e.target.onmouseover = null;
-            }
-        }
-    }, true);
-
-    // 5. target="_blank" の削除 & 画面を覆うレイヤー削除
+    // 3. target="_blank" の削除 ＆ 画面を覆う透明レイヤーの即時削除
     function cleanUp() {
-        // リフレッシュメタタグの二重チェック
-        document.querySelectorAll('meta[http-equiv="refresh"]').forEach(el => el.remove());
-        
-        // target="_blank" 削除
         document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
         
-        // 画面全体を覆う透明レイヤー削除
-        document.querySelectorAll('div, section, a, span').forEach(el => {
+        // 画面全体を覆う透明な広告オーバーレイを検出して削除
+        document.querySelectorAll('div, section, a').forEach(el => {
             const style = window.getComputedStyle(el);
             if ((style.position === 'fixed' || style.position === 'absolute') &&
                 (parseInt(style.zIndex) > 1000) &&
@@ -162,29 +116,24 @@ iframe[src*="about:blank"], iframe:not([src]) {
                 el.remove();
             }
         });
-
-        // onclick/onmouseover 属性内のリダイレクト命令を削除
-        document.querySelectorAll('[onclick], [onmouseover], [onload], [onmouseenter]').forEach(el => {
-            ['onclick', 'onmouseover', 'onload', 'onmouseenter'].forEach(attr => {
-                const val = el.getAttribute(attr);
-                if (val && (val.includes('location') || val.includes('window.open') || val.includes('redirect'))) {
-                    el.removeAttribute(attr);
-                    console.warn('[Anti-Redirect] Removed malicious attribute:', attr, val);
-                }
-            });
-        });
     }
 
-    // 初期化 + 定期監視
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => {
-            cleanUp();
-            setInterval(cleanUp, 300);
-        });
-    } else {
+    // イベントジャック（クリック横取り）防止
+    document.addEventListener('click', function(e) {
+        let target = e.target;
+        while (target && target !== document.body) {
+            if (target.tagName === 'A' && target.getAttribute('onclick')) {
+                target.removeAttribute('onclick');
+                break;
+            }
+            target = target.parentElement;
+        }
+    }, true);
+
+    document.addEventListener('DOMContentLoaded', () => {
         cleanUp();
-        setInterval(cleanUp, 300);
-    }
+        setInterval(cleanUp, 500); // 0.5秒ごとに追跡削除
+    });
 })();
 </script>
 """
@@ -228,17 +177,10 @@ def remove_ads(html: str) -> str:
         html = re.sub(r"<iframe[^>]*" + escaped + r"[^>]*>.*?</iframe>", "", html, flags=re.IGNORECASE | re.DOTALL)
         html = re.sub(r"<a[^>]*" + escaped + r"[^>]*>.*?</a>", "", html, flags=re.IGNORECASE | re.DOTALL)
 
-    # 2. メタリフレッシュ削除（リダイレクト防止）
-    html = re.sub(r'<meta\s+http-equiv=["\']?refresh["\']?[^>]*>', '', html, flags=re.IGNORECASE | re.DOTALL)
-
-    # 3. onclick/onload/onmouseover 属性内のリダイレクト命令削除
-    html = re.sub(r'on(?:click|load|mouseover|mouseenter)=["\'][^"\']*(?:location|window\.open|redirect)[^"\']*["\']', '', html, flags=re.IGNORECASE)
+    # 2. onclick 属性に入っているリダイレクト命令を強力削除
     html = re.sub(r'onclick=["\'][^"\']*(?:window\.open|location\.href)[^"\']*["\']', '', html, flags=re.IGNORECASE)
 
-    # 4. リダイレクト系のスクリプトタグ削除
-    html = re.sub(r'<script[^>]*>.*?(?:location\.href|window\.location|location\.replace)[^<]*</script>', '', html, flags=re.IGNORECASE | re.DOTALL)
-
-    # 5. 最新版のリダイレクト阻止＆CSS隠蔽スクリプトを注入
+    # 3. 最新版のリダイレクト阻止＆CSS隠蔽スクリプトを注入
     if "<head>" in html:
         html = html.replace("<head>", f"<head>{ANTI_REDIRECT_SCRIPT}", 1)
     elif "<HEAD>" in html:
@@ -292,7 +234,7 @@ def rewrite_img_urls(html: str) -> str:
     return html
 
 # -------------------------------------------------------
-# /imgproxy/{image_url}  — 画像リバースプロキシ（キャッシュ有効）
+# /imgproxy/{image_url}  — 画像リバースプロキシ
 # -------------------------------------------------------
 @app.get("/imgproxy/{image_url:path}")
 async def imgproxy(image_url: str, request: Request):
@@ -312,7 +254,7 @@ async def imgproxy(image_url: str, request: Request):
             break
 
     proxy_headers = {
-        "User-Agent": request.headers.get("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+        "User-Agent": request.headers.get("user-agent", "Mozilla/5.0"),
         "Accept": request.headers.get("accept", "image/webp,image/*,*/*"),
         "Referer": referer,
     }
@@ -321,8 +263,7 @@ async def imgproxy(image_url: str, request: Request):
         res = await core.http_client.get(image_url, headers=proxy_headers)
         res_headers = {k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS}
         res_headers["Access-Control-Allow-Origin"] = "*"
-        # キャッシュ有効化：1時間キャッシュ
-        res_headers["Cache-Control"] = "public, max-age=3600"
+        res_headers["Cache-Control"] = "public, max-age=86400"
         return Response(
             content=res.content,
             status_code=res.status_code,
@@ -330,7 +271,7 @@ async def imgproxy(image_url: str, request: Request):
             media_type=res.headers.get("content-type", "image/webp"),
         )
     except Exception as e:
-        print(f"[ERROR] imgproxy error for {image_url}: {e}")
+        print(f"imgproxy error: {e}")
         return Response(status_code=502, content=b"imgproxy failed")
 
 # -------------------------------------------------------
@@ -341,7 +282,7 @@ async def root():
     return RedirectResponse(url=f"/{DEFAULT_SITE}/")
 
 # -------------------------------------------------------
-# /{raw_path}  — 汎用リバースプロキシ（キャッシュ有効）
+# /{raw_path}  — 汎用リバースプロキシ
 # -------------------------------------------------------
 @app.api_route("/{raw_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def proxy(request: Request, raw_path: str):
@@ -364,8 +305,6 @@ async def proxy(request: Request, raw_path: str):
     url = f"{origin}{target_path}"
     if request.url.query:
         url += f"?{request.url.query}"
-    
-    print(f"[PROXY] site_key={site_key}, target_path={target_path}, final_url={url}")
 
     client_referer = request.headers.get("referer", "")
     if client_referer:
@@ -383,9 +322,8 @@ async def proxy(request: Request, raw_path: str):
         "Host": origin.replace("https://", "").replace("http://", ""),
         "X-Forwarded-Host": request.headers.get("host", ""),
         "X-Forwarded-Proto": "https",
-        "User-Agent": request.headers.get("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
-        "Accept": request.headers.get("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"),
-        "Accept-Encoding": "gzip, deflate, br",
+        "User-Agent": request.headers.get("user-agent", "Mozilla/5.0"),
+        "Accept": request.headers.get("accept", "*/*"),
         "Accept-Language": request.headers.get("accept-language", "ja,en-US;q=0.9,en;q=0.8"),
         "Cookie": request.headers.get("cookie", ""),
         "Referer": fake_referer,
@@ -412,12 +350,6 @@ async def proxy(request: Request, raw_path: str):
         res_headers = {k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS}
         res_headers["Access-Control-Allow-Origin"] = "*"
         res_headers["Access-Control-Allow-Credentials"] = "true"
-        
-        # キャッシュ有効化：HTML は1時間、その他は24時間キャッシュ
-        if "text/html" in content_type:
-            res_headers["Cache-Control"] = "public, max-age=3600"  # 1時間
-        else:
-            res_headers["Cache-Control"] = "public, max-age=86400"  # 24時間
 
         if "text/html" in content_type:
             html = res.text
@@ -439,22 +371,9 @@ async def proxy(request: Request, raw_path: str):
         )
 
     except Exception as e:
-        print(f"[ERROR] Proxy error for {url}: {e}")
-        import traceback
-        traceback.print_exc()
-        error_html = f"""
-        <html>
-        <head><title>Proxy Error</title></head>
-        <body style="font-family: monospace; padding: 20px;">
-        <h1>🚨 プロキシエラー</h1>
-        <p><strong>URL:</strong> {url}</p>
-        <p><strong>エラー:</strong> {str(e)}</p>
-        <p><a href="/{DEFAULT_SITE}/">ホームに戻る</a></p>
-        </body>
-        </html>
-        """
-        return Response(status_code=502, content=error_html.encode("utf-8"), media_type="text/html")
+        print(f"Proxy error: {e}")
+        return Response(status_code=502, content=b"Worker connection failed")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run("main_fixed:app", host="0.0.0.0", port=8080, reload=True)
