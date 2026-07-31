@@ -1,10 +1,19 @@
 import re
+import time
 from contextlib import asynccontextmanager
+from typing import Dict, Tuple
 
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+
+# -------------------------------------------------------
+# 【キャッシュ設定】1時間 (3600秒) キャッシュする
+# -------------------------------------------------------
+# 保存形式: { URLキー: (保存時間, コンテンツ(bytes), ステータスコード, ヘッダー, メディアタイプ) }
+_CACHE: Dict[str, Tuple[float, bytes, int, dict, str]] = {}
+CACHE_TTL = 3600  # 1時間
 
 # -------------------------------------------------------
 # 【マルチサイト設定】見たいサイトをここに追加
@@ -39,7 +48,8 @@ core = Core()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+    # ★ follow_redirects=False に変更し、勝手な裏側でのリダイレクトを防止
+    core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=False)
     yield
     await core.http_client.aclose()
 
@@ -170,6 +180,9 @@ def _rewrite_srcset(srcset: str) -> str:
 # 広告・リダイレクトコード除去処理
 # -------------------------------------------------------
 def remove_ads(html: str) -> str:
+    # ★ HTMLメタタグによる自動リダイレクト (meta refresh) を強制削除
+    html = re.sub(r'<meta[^>]*http-equiv=["\']?refresh["\']?[^>]*>', '', html, flags=re.IGNORECASE)
+
     # 1. 広告ドメインを含むタグの物理削除
     for domain in AD_DOMAINS:
         escaped = re.escape(domain)
@@ -182,9 +195,9 @@ def remove_ads(html: str) -> str:
 
     # 3. 最新版のリダイレクト阻止＆CSS隠蔽スクリプトを注入
     if "<head>" in html:
-        html = html.replace("<head>", f"<head>{ANTI_REDIRECT_SCRIPT}", 1)
+        html = html.replace("<head>", f"<head>\n{ANTI_REDIRECT_SCRIPT}", 1)
     elif "<HEAD>" in html:
-        html = html.replace("<HEAD>", f"<HEAD>{ANTI_REDIRECT_SCRIPT}", 1)
+        html = html.replace("<HEAD>", f"<HEAD>\n{ANTI_REDIRECT_SCRIPT}", 1)
     else:
         html = ANTI_REDIRECT_SCRIPT + html
 
@@ -234,7 +247,7 @@ def rewrite_img_urls(html: str) -> str:
     return html
 
 # -------------------------------------------------------
-# /imgproxy/{image_url}  — 画像リバースプロキシ
+# /imgproxy/{image_url}  — 画像リバースプロキシ (1時間キャッシュ対応)
 # -------------------------------------------------------
 @app.get("/imgproxy/{image_url:path}")
 async def imgproxy(image_url: str, request: Request):
@@ -246,6 +259,13 @@ async def imgproxy(image_url: str, request: Request):
     image_url = image_url.replace("https%3A//", "https://").replace("http%3A//", "http://")
     if not image_url.startswith("http"):
         image_url = "https://" + image_url
+
+    # ★ 1時間のメモリキャッシュ確認
+    cache_key = f"img:{image_url}"
+    if cache_key in _CACHE:
+        timestamp, c_content, c_status, c_headers, c_media = _CACHE[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return Response(content=c_content, status_code=c_status, headers=c_headers, media_type=c_media)
 
     referer = "https://" + image_url.split("/")[2] + "/"
     for key, origin_url in SITES.items():
@@ -263,12 +283,18 @@ async def imgproxy(image_url: str, request: Request):
         res = await core.http_client.get(image_url, headers=proxy_headers)
         res_headers = {k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS}
         res_headers["Access-Control-Allow-Origin"] = "*"
-        res_headers["Cache-Control"] = "public, max-age=86400"
+        res_headers["Cache-Control"] = "public, max-age=3600" # ブラウザにも1時間キャッシュを指示
+        media_type = res.headers.get("content-type", "image/webp")
+
+        # ★ 通信成功(200)ならメモリキャッシュに保存
+        if res.status_code == 200:
+            _CACHE[cache_key] = (time.time(), res.content, res.status_code, res_headers, media_type)
+
         return Response(
             content=res.content,
             status_code=res.status_code,
             headers=res_headers,
-            media_type=res.headers.get("content-type", "image/webp"),
+            media_type=media_type,
         )
     except Exception as e:
         print(f"imgproxy error: {e}")
@@ -282,7 +308,7 @@ async def root():
     return RedirectResponse(url=f"/{DEFAULT_SITE}/")
 
 # -------------------------------------------------------
-# /{raw_path}  — 汎用リバースプロキシ
+# /{raw_path}  — 汎用リバースプロキシ (1時間キャッシュ対応)
 # -------------------------------------------------------
 @app.api_route("/{raw_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def proxy(request: Request, raw_path: str):
@@ -305,6 +331,13 @@ async def proxy(request: Request, raw_path: str):
     url = f"{origin}{target_path}"
     if request.url.query:
         url += f"?{request.url.query}"
+
+    # ★ GET通信なら1時間のメモリキャッシュ確認
+    cache_key = f"{request.method}:{url}"
+    if request.method == "GET" and cache_key in _CACHE:
+        timestamp, c_content, c_status, c_headers, c_media = _CACHE[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return Response(content=c_content, status_code=c_status, headers=c_headers, media_type=c_media)
 
     client_referer = request.headers.get("referer", "")
     if client_referer:
@@ -350,18 +383,46 @@ async def proxy(request: Request, raw_path: str):
         res_headers = {k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS}
         res_headers["Access-Control-Allow-Origin"] = "*"
         res_headers["Access-Control-Allow-Credentials"] = "true"
+        res_headers["Cache-Control"] = "public, max-age=3600" # ブラウザに1時間キャッシュを指示
+
+        # ★ サーバー側からのリダイレクト(301/302等)を検知して制御
+        if res.status_code in (301, 302, 303, 307, 308):
+            loc = res_headers.get("location", "")
+            if loc:
+                # 広告ドメインへ飛ばされそうになったらブロックしてトップページへ戻す
+                if any(ad in loc for ad in AD_DOMAINS):
+                    return RedirectResponse(url=f"/{site_key}/")
+                
+                # サイト内の正常なリダイレクトなら、プロキシ用のURLに書き換えて許可
+                if loc.startswith("http"):
+                    loc = loc.replace(origin, f"/{site_key}")
+                if loc.startswith("/"):
+                    if not loc.startswith(f"/{site_key}/"):
+                        loc = f"/{site_key}{loc}"
+                res_headers["location"] = loc
 
         if "text/html" in content_type:
             html = res.text
             html = remove_ads(html)
             html = rewrite_site_links(html, site_key, origin)
             html = rewrite_img_urls(html)
+            
+            encoded_html = html.encode("utf-8")
+            
+            # ★ 成功(200)ならHTMLをメモリキャッシュに保存
+            if request.method == "GET" and res.status_code == 200:
+                _CACHE[cache_key] = (time.time(), encoded_html, res.status_code, res_headers, content_type)
+
             return Response(
-                content=html.encode("utf-8"),
+                content=encoded_html,
                 status_code=res.status_code,
                 headers=res_headers,
                 media_type=content_type,
             )
+
+        # HTML以外（APIやJSON）のキャッシュ処理
+        if request.method == "GET" and res.status_code == 200:
+            _CACHE[cache_key] = (time.time(), res.content, res.status_code, res_headers, content_type)
 
         return Response(
             content=res.content,
