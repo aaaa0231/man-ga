@@ -15,7 +15,7 @@ _CACHE: Dict[str, Tuple[float, bytes, int, dict, str]] = {}
 CACHE_TTL = 3600  # 1時間
 
 # -------------------------------------------------------
-# 【マルチサイト設定】見たいサイトをここに追加
+# 【マルチサイト設定】
 # -------------------------------------------------------
 SITES = {
     "mangarw": "https://mangarw.com",
@@ -46,6 +46,7 @@ core = Core()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # httpx側で自動的に解凍(gzip/brotli)を行う設定
     core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=False)
     yield
     await core.http_client.aclose()
@@ -72,7 +73,6 @@ _SKIP_HEADERS = {
 # -------------------------------------------------------
 ANTI_REDIRECT_SCRIPT = """
 <style>
-/* 広告・ポップアップ・透明オーバーレイを強制的に画面から消す */
 [class*="ad-"], [class*="ad_"], [id*="ad-"], [id*="ad_"],
 [class*="banner"], [id*="banner"], [class*="pop-"], [class*="popup"],
 div[style*="z-index: 2147483647"], div[style*="z-index: 99999"],
@@ -86,39 +86,23 @@ iframe[src*="about:blank"], iframe:not([src]) {
 <script>
 (function() {
     'use strict';
-
-    // 1. 別タブ・ポップアップの絶対無効化
-    window.open = function() {
-        console.warn('[Anti-Ad] Blocked window.open');
-        return null;
-    };
-
-    // 2. location 渡しの強制書き換え（ページ移動を監視）
+    window.open = function() { return null; };
     try {
-        const originalLocation = window.location.href;
         let isUserAction = false;
-
-        // ユーザーの正規なクリックのみ許可するフラグ
         document.addEventListener('click', (e) => {
             const a = e.target.closest('a');
-            if (a && a.href && !a.href.includes('javascript:')) {
-                isUserAction = true;
-            }
+            if (a && a.href && !a.href.includes('javascript:')) isUserAction = true;
         }, true);
     } catch(e) {}
 
-    // 3. 動的スクリプト読み込みの監視とブロック
     const originalCreateElement = document.createElement.bind(document);
     document.createElement = function(tagName, options) {
         const el = originalCreateElement(tagName, options);
         if (tagName.toLowerCase() === 'script') {
             const originalSetAttribute = el.setAttribute.bind(el);
             el.setAttribute = function(name, value) {
-                if (name.toLowerCase() === 'src') {
-                    if (value.includes('http') && !value.includes(location.host)) {
-                        console.warn('[Anti-Ad] Blocked dynamic script:', value);
-                        return;
-                    }
+                if (name.toLowerCase() === 'src' && value.includes('http') && !value.includes(location.host)) {
+                    return;
                 }
                 return originalSetAttribute(name, value);
             };
@@ -126,56 +110,43 @@ iframe[src*="about:blank"], iframe:not([src]) {
         return el;
     };
 
-    // 4. クリック・タップ横取りの無力化（最優先処理）
     function sanitizeElement(el) {
         if (!el) return;
-        // onclick 属性に入ったポップアップ命令を消去
         if (el.getAttribute && el.getAttribute('onclick')) {
             const onclickVal = el.getAttribute('onclick');
             if (onclickVal.includes('window.open') || onclickVal.includes('location') || onclickVal.includes('http')) {
                 el.removeAttribute('onclick');
             }
         }
-        // target="_blank" (別タブ) の削除
-        if (el.tagName === 'A') {
-            el.removeAttribute('target');
-        }
+        if (el.tagName === 'A') el.removeAttribute('target');
     }
 
-    // タップされた瞬間に広告判定を行って無害化（捕獲フェーズ）
     ['click', 'touchstart', 'touchend', 'mousedown', 'mouseup'].forEach(eventType => {
         document.addEventListener(eventType, function(e) {
             let target = e.target;
             while (target && target !== document.body) {
                 sanitizeElement(target);
-                
-                // 画面全体を覆う透明な広告レイヤーを検出して消去
                 const style = window.getComputedStyle(target);
                 if ((style.position === 'fixed' || style.position === 'absolute') &&
                     (parseInt(style.zIndex) > 500) &&
                     !target.querySelector('img') && !target.querySelector('video') &&
                     target.tagName !== 'A' && target.tagName !== 'BUTTON') {
-                    
-                    // 漫画に関係のない巨大透明枠なら消す
                     if (target.offsetWidth > window.innerWidth * 0.8 && target.offsetHeight > window.innerHeight * 0.8) {
                         e.stopPropagation();
                         e.preventDefault();
                         target.remove();
-                        console.warn('[Anti-Ad] Removed full-screen overlay');
                         return false;
                     }
                 }
                 target = target.parentElement;
             }
-        }, true); // true = 最優先でイベントを捕獲
+        }, true);
     });
 
-    // 5. 定期クリーンアップ（0.3秒ごと）
     function cleanUp() {
         document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
         document.querySelectorAll('[onclick]').forEach(el => sanitizeElement(el));
     }
-
     document.addEventListener('DOMContentLoaded', () => {
         cleanUp();
         setInterval(cleanUp, 300);
@@ -185,7 +156,7 @@ iframe[src*="about:blank"], iframe:not([src]) {
 """
 
 # -------------------------------------------------------
-# 画像 URL を /imgproxy/ 経由に書き換える処理
+# URL・リンク書き換え処理
 # -------------------------------------------------------
 _SRCSET_ENTRY_RE = re.compile(r"(https?://[^\s,]+)", re.IGNORECASE)
 _CSS_URL_RE = re.compile(
@@ -207,40 +178,26 @@ def _rewrite_srcset(srcset: str) -> str:
         return _to_imgproxy(m.group(1))
     return _SRCSET_ENTRY_RE.sub(replace_url, srcset)
 
-# -------------------------------------------------------
-# 広告・リダイレクトコード除去処理
-# -------------------------------------------------------
 def remove_ads(html: str) -> str:
-    # 1. 自動リダイレクトタグを破壊
     html = re.sub(r'<meta[^>]*http-equiv=["\']?refresh["\']?[^>]*>', '', html, flags=re.IGNORECASE)
-
-    # 2. 外部広告ドメインタグの物理削除
     for domain in AD_DOMAINS:
         escaped = re.escape(domain)
         html = re.sub(r"<script[^>]*" + escaped + r"[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
         html = re.sub(r"<iframe[^>]*" + escaped + r"[^>]*>.*?</iframe>", "", html, flags=re.IGNORECASE | re.DOTALL)
         html = re.sub(r"<a[^>]*" + escaped + r"[^>]*>.*?</a>", "", html, flags=re.IGNORECASE | re.DOTALL)
-
-    # 3. onclick・href 内の強力リダイレクト属性の削ぎ落とし
     html = re.sub(r'onclick=["\'][^"\']*(?:window\.open|location\.href|location\.assign)[^"\']*["\']', '', html, flags=re.IGNORECASE)
-
-    # 4. 超強化スクリプトの注入
+    
     if "<head>" in html:
         html = html.replace("<head>", f"<head>\n{ANTI_REDIRECT_SCRIPT}", 1)
     elif "<HEAD>" in html:
         html = html.replace("<HEAD>", f"<HEAD>\n{ANTI_REDIRECT_SCRIPT}", 1)
     else:
         html = ANTI_REDIRECT_SCRIPT + html
-
     return html
 
-# -------------------------------------------------------
-# URL・リンク書き換え処理
-# -------------------------------------------------------
 def rewrite_site_links(html: str, site_key: str, origin: str) -> str:
     escaped_origin = re.escape(origin)
     html = re.sub(escaped_origin, f"/{site_key}", html, flags=re.IGNORECASE)
-
     def rewrite_href(m: re.Match) -> str:
         quote, path = m.group(1), m.group(2)
         if any(path.startswith(prefix) for prefix in ["//", "http:", "https:", "javascript:", "data:", "#"]):
@@ -248,7 +205,6 @@ def rewrite_site_links(html: str, site_key: str, origin: str) -> str:
         if path.startswith(f"/{site_key}/") or path == f"/{site_key}":
             return m.group(0)
         return f"href={quote}/{site_key}{path}{quote}"
-
     html = re.sub(r'href=(["\'])(/[^"\']*)\1', rewrite_href, html, flags=re.IGNORECASE)
     return html
 
@@ -258,27 +214,22 @@ def rewrite_img_urls(html: str) -> str:
         if url.startswith("data:") or "/imgproxy/" in url:
             return m.group(0)
         return f"{attr}={quote}{_to_imgproxy(url)}{quote}"
-
     html = re.sub(r'(src)=(["\'])(https?://[^\s"\']+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\']*)\2', rewrite_src, html, flags=re.IGNORECASE)
     html = re.sub(r'(data-(?:src|lazy-src|original|bg))=(["\'])(https?://[^\s"\']+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\']*)\2', rewrite_src, html, flags=re.IGNORECASE)
-
     def rewrite_srcset_attr(m: re.Match) -> str:
         attr, quote, val = m.group(1), m.group(2), m.group(3)
         return f"{attr}={quote}{_rewrite_srcset(val)}{quote}"
-
     html = re.sub(r'((?:data-)?srcset)=(["\'])([^"\']+)\2', rewrite_srcset_attr, html, flags=re.IGNORECASE)
-
     def rewrite_css_url(m: re.Match) -> str:
         quote, url = m.group(1), m.group(2)
         if url.startswith("data:") or "/imgproxy/" in url:
             return m.group(0)
         return f"url({quote}{_to_imgproxy(url)}{quote})"
-
     html = _CSS_URL_RE.sub(rewrite_css_url, html)
     return html
 
 # -------------------------------------------------------
-# /imgproxy/{image_url}  — 画像リバースプロキシ (1時間キャッシュ)
+# /imgproxy/{image_url}
 # -------------------------------------------------------
 @app.get("/imgproxy/{image_url:path}")
 async def imgproxy(image_url: str, request: Request):
@@ -306,6 +257,7 @@ async def imgproxy(image_url: str, request: Request):
         "User-Agent": request.headers.get("user-agent", "Mozilla/5.0"),
         "Accept": request.headers.get("accept", "image/webp,image/*,*/*"),
         "Referer": referer,
+        "Accept-Encoding": "gzip, deflate", # ★追加：画像も標準解凍
     }
 
     try:
@@ -318,25 +270,19 @@ async def imgproxy(image_url: str, request: Request):
         if res.status_code == 200:
             _CACHE[cache_key] = (time.time(), res.content, res.status_code, res_headers, media_type)
 
-        return Response(
-            content=res.content,
-            status_code=res.status_code,
-            headers=res_headers,
-            media_type=media_type,
-        )
-    except Exception as e:
-        print(f"imgproxy error: {e}")
+        return Response(content=res.content, status_code=res.status_code, headers=res_headers, media_type=media_type)
+    except Exception:
         return Response(status_code=502, content=b"imgproxy failed")
 
 # -------------------------------------------------------
-# ルートパスをデフォルトサイトにリダイレクト
+# ルートパス
 # -------------------------------------------------------
 @app.get("/")
 async def root():
     return RedirectResponse(url=f"/{DEFAULT_SITE}/")
 
 # -------------------------------------------------------
-# /{raw_path}  — 汎用リバースプロキシ (1時間キャッシュ)
+# 汎用リバースプロキシ
 # -------------------------------------------------------
 @app.api_route("/{raw_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def proxy(request: Request, raw_path: str):
@@ -378,6 +324,7 @@ async def proxy(request: Request, raw_path: str):
     else:
         fake_referer = f"{origin}/"
 
+    # ★ここが重要！Accept-Encodingを追加して、解凍しやすい形式で要求する
     proxy_headers = {
         "Host": origin.replace("https://", "").replace("http://", ""),
         "X-Forwarded-Host": request.headers.get("host", ""),
@@ -388,6 +335,7 @@ async def proxy(request: Request, raw_path: str):
         "Cookie": request.headers.get("cookie", ""),
         "Referer": fake_referer,
         "Origin": origin,
+        "Accept-Encoding": "gzip, deflate", # ★Brotliをブロックして解凍エラーを防ぐ
     }
 
     for header_name in ["content-type", "x-requested-with", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"]:
@@ -412,13 +360,11 @@ async def proxy(request: Request, raw_path: str):
         res_headers["Access-Control-Allow-Credentials"] = "true"
         res_headers["Cache-Control"] = "public, max-age=3600"
 
-        # サーバー側リダイレクト(301/302)の徹底ブロック＆書き換え
         if res.status_code in (301, 302, 303, 307, 308):
             loc = res_headers.get("location", "")
             if loc:
                 if any(ad in loc for ad in AD_DOMAINS):
                     return RedirectResponse(url=f"/{site_key}/")
-                
                 if loc.startswith("http"):
                     loc = loc.replace(origin, f"/{site_key}")
                 if loc.startswith("/"):
@@ -427,7 +373,9 @@ async def proxy(request: Request, raw_path: str):
                 res_headers["location"] = loc
 
         if "text/html" in content_type:
-            html = res.text
+            # ★文字化け防止のため、バイナリ(content)から強制的にUTF-8デコード
+            html = res.content.decode("utf-8", errors="ignore")
+            
             html = remove_ads(html)
             html = rewrite_site_links(html, site_key, origin)
             html = rewrite_img_urls(html)
@@ -437,22 +385,12 @@ async def proxy(request: Request, raw_path: str):
             if request.method == "GET" and res.status_code == 200:
                 _CACHE[cache_key] = (time.time(), encoded_html, res.status_code, res_headers, content_type)
 
-            return Response(
-                content=encoded_html,
-                status_code=res.status_code,
-                headers=res_headers,
-                media_type=content_type,
-            )
+            return Response(content=encoded_html, status_code=res.status_code, headers=res_headers, media_type=content_type)
 
         if request.method == "GET" and res.status_code == 200:
             _CACHE[cache_key] = (time.time(), res.content, res.status_code, res_headers, content_type)
 
-        return Response(
-            content=res.content,
-            status_code=res.status_code,
-            headers=res_headers,
-            media_type=content_type,
-        )
+        return Response(content=res.content, status_code=res.status_code, headers=res_headers, media_type=content_type)
 
     except Exception as e:
         print(f"Proxy error: {e}")
