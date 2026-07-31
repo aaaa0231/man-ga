@@ -11,7 +11,6 @@ from fastapi.responses import RedirectResponse
 # -------------------------------------------------------
 # 【キャッシュ設定】1時間 (3600秒) キャッシュする
 # -------------------------------------------------------
-# 保存形式: { URLキー: (保存時間, コンテンツ(bytes), ステータスコード, ヘッダー, メディアタイプ) }
 _CACHE: Dict[str, Tuple[float, bytes, int, dict, str]] = {}
 CACHE_TTL = 3600  # 1時間
 
@@ -21,7 +20,6 @@ CACHE_TTL = 3600  # 1時間
 SITES = {
     "mangarw": "https://mangarw.com",
     "soraraw": "https://soraraw.com",
-    # "site2": "https://example.com", 
 }
 
 DEFAULT_SITE = "mangarw"
@@ -48,7 +46,6 @@ core = Core()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ★ follow_redirects=False に変更し、勝手な裏側でのリダイレクトを防止
     core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=False)
     yield
     await core.http_client.aclose()
@@ -71,11 +68,11 @@ _SKIP_HEADERS = {
 }
 
 # -------------------------------------------------------
-# 最新・最強版「リダイレクト阻止 ＆ 広告強制非表示スクリプト」
+# 【超強化版】リダイレクト・ポップアップ完全抹殺スクリプト
 # -------------------------------------------------------
 ANTI_REDIRECT_SCRIPT = """
 <style>
-/* CSSレベルで広告要素・バナー・透明オーバーレイを強制消去 */
+/* 広告・ポップアップ・透明オーバーレイを強制的に画面から消す */
 [class*="ad-"], [class*="ad_"], [id*="ad-"], [id*="ad_"],
 [class*="banner"], [id*="banner"], [class*="pop-"], [class*="popup"],
 div[style*="z-index: 2147483647"], div[style*="z-index: 99999"],
@@ -90,10 +87,27 @@ iframe[src*="about:blank"], iframe:not([src]) {
 (function() {
     'use strict';
 
-    // 1. window.open (別タブ・ポップアップ) の完全無効化
-    window.open = function() { return null; };
+    // 1. 別タブ・ポップアップの絶対無効化
+    window.open = function() {
+        console.warn('[Anti-Ad] Blocked window.open');
+        return null;
+    };
 
-    // 2. 動的な <script> タグの生成を監視し、不審な外部スクリプトの差し込みを防止
+    // 2. location 渡しの強制書き換え（ページ移動を監視）
+    try {
+        const originalLocation = window.location.href;
+        let isUserAction = false;
+
+        // ユーザーの正規なクリックのみ許可するフラグ
+        document.addEventListener('click', (e) => {
+            const a = e.target.closest('a');
+            if (a && a.href && !a.href.includes('javascript:')) {
+                isUserAction = true;
+            }
+        }, true);
+    } catch(e) {}
+
+    // 3. 動的スクリプト読み込みの監視とブロック
     const originalCreateElement = document.createElement.bind(document);
     document.createElement = function(tagName, options) {
         const el = originalCreateElement(tagName, options);
@@ -101,7 +115,6 @@ iframe[src*="about:blank"], iframe:not([src]) {
             const originalSetAttribute = el.setAttribute.bind(el);
             el.setAttribute = function(name, value) {
                 if (name.toLowerCase() === 'src') {
-                    // ドメインが異なる不審なスクリプト読み込みを拒否
                     if (value.includes('http') && !value.includes(location.host)) {
                         console.warn('[Anti-Ad] Blocked dynamic script:', value);
                         return;
@@ -113,36 +126,59 @@ iframe[src*="about:blank"], iframe:not([src]) {
         return el;
     };
 
-    // 3. target="_blank" の削除 ＆ 画面を覆う透明レイヤーの即時削除
-    function cleanUp() {
-        document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
-        
-        // 画面全体を覆う透明な広告オーバーレイを検出して削除
-        document.querySelectorAll('div, section, a').forEach(el => {
-            const style = window.getComputedStyle(el);
-            if ((style.position === 'fixed' || style.position === 'absolute') &&
-                (parseInt(style.zIndex) > 1000) &&
-                !el.querySelector('img') && !el.querySelector('video')) {
-                el.remove();
+    // 4. クリック・タップ横取りの無力化（最優先処理）
+    function sanitizeElement(el) {
+        if (!el) return;
+        // onclick 属性に入ったポップアップ命令を消去
+        if (el.getAttribute && el.getAttribute('onclick')) {
+            const onclickVal = el.getAttribute('onclick');
+            if (onclickVal.includes('window.open') || onclickVal.includes('location') || onclickVal.includes('http')) {
+                el.removeAttribute('onclick');
             }
-        });
+        }
+        // target="_blank" (別タブ) の削除
+        if (el.tagName === 'A') {
+            el.removeAttribute('target');
+        }
     }
 
-    // イベントジャック（クリック横取り）防止
-    document.addEventListener('click', function(e) {
-        let target = e.target;
-        while (target && target !== document.body) {
-            if (target.tagName === 'A' && target.getAttribute('onclick')) {
-                target.removeAttribute('onclick');
-                break;
+    // タップされた瞬間に広告判定を行って無害化（捕獲フェーズ）
+    ['click', 'touchstart', 'touchend', 'mousedown', 'mouseup'].forEach(eventType => {
+        document.addEventListener(eventType, function(e) {
+            let target = e.target;
+            while (target && target !== document.body) {
+                sanitizeElement(target);
+                
+                // 画面全体を覆う透明な広告レイヤーを検出して消去
+                const style = window.getComputedStyle(target);
+                if ((style.position === 'fixed' || style.position === 'absolute') &&
+                    (parseInt(style.zIndex) > 500) &&
+                    !target.querySelector('img') && !target.querySelector('video') &&
+                    target.tagName !== 'A' && target.tagName !== 'BUTTON') {
+                    
+                    // 漫画に関係のない巨大透明枠なら消す
+                    if (target.offsetWidth > window.innerWidth * 0.8 && target.offsetHeight > window.innerHeight * 0.8) {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        target.remove();
+                        console.warn('[Anti-Ad] Removed full-screen overlay');
+                        return false;
+                    }
+                }
+                target = target.parentElement;
             }
-            target = target.parentElement;
-        }
-    }, true);
+        }, true); // true = 最優先でイベントを捕獲
+    });
+
+    // 5. 定期クリーンアップ（0.3秒ごと）
+    function cleanUp() {
+        document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
+        document.querySelectorAll('[onclick]').forEach(el => sanitizeElement(el));
+    }
 
     document.addEventListener('DOMContentLoaded', () => {
         cleanUp();
-        setInterval(cleanUp, 500); // 0.5秒ごとに追跡削除
+        setInterval(cleanUp, 300);
     });
 })();
 </script>
@@ -151,10 +187,6 @@ iframe[src*="about:blank"], iframe:not([src]) {
 # -------------------------------------------------------
 # 画像 URL を /imgproxy/ 経由に書き換える処理
 # -------------------------------------------------------
-_IMG_EXT_RE = re.compile(
-    r'https?://[^\s"\')\]>]+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)(?:[?#][^\s"\')\]>]*)?',
-    re.IGNORECASE,
-)
 _SRCSET_ENTRY_RE = re.compile(r"(https?://[^\s,]+)", re.IGNORECASE)
 _CSS_URL_RE = re.compile(
     r'url\(\s*(["\']?)(https?://[^\s"\')\]>]+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\')\]>]*)\1\s*\)',
@@ -164,7 +196,6 @@ _CSS_URL_RE = re.compile(
 def _to_imgproxy(url: str) -> str:
     if "/imgproxy/" in url:
         return url
-    # 広告ドメインの画像は読み込まずに無効化
     for ad_domain in AD_DOMAINS:
         if ad_domain in url:
             return "about:blank"
@@ -180,20 +211,20 @@ def _rewrite_srcset(srcset: str) -> str:
 # 広告・リダイレクトコード除去処理
 # -------------------------------------------------------
 def remove_ads(html: str) -> str:
-    # ★ HTMLメタタグによる自動リダイレクト (meta refresh) を強制削除
+    # 1. 自動リダイレクトタグを破壊
     html = re.sub(r'<meta[^>]*http-equiv=["\']?refresh["\']?[^>]*>', '', html, flags=re.IGNORECASE)
 
-    # 1. 広告ドメインを含むタグの物理削除
+    # 2. 外部広告ドメインタグの物理削除
     for domain in AD_DOMAINS:
         escaped = re.escape(domain)
         html = re.sub(r"<script[^>]*" + escaped + r"[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
         html = re.sub(r"<iframe[^>]*" + escaped + r"[^>]*>.*?</iframe>", "", html, flags=re.IGNORECASE | re.DOTALL)
         html = re.sub(r"<a[^>]*" + escaped + r"[^>]*>.*?</a>", "", html, flags=re.IGNORECASE | re.DOTALL)
 
-    # 2. onclick 属性に入っているリダイレクト命令を強力削除
-    html = re.sub(r'onclick=["\'][^"\']*(?:window\.open|location\.href)[^"\']*["\']', '', html, flags=re.IGNORECASE)
+    # 3. onclick・href 内の強力リダイレクト属性の削ぎ落とし
+    html = re.sub(r'onclick=["\'][^"\']*(?:window\.open|location\.href|location\.assign)[^"\']*["\']', '', html, flags=re.IGNORECASE)
 
-    # 3. 最新版のリダイレクト阻止＆CSS隠蔽スクリプトを注入
+    # 4. 超強化スクリプトの注入
     if "<head>" in html:
         html = html.replace("<head>", f"<head>\n{ANTI_REDIRECT_SCRIPT}", 1)
     elif "<HEAD>" in html:
@@ -247,11 +278,10 @@ def rewrite_img_urls(html: str) -> str:
     return html
 
 # -------------------------------------------------------
-# /imgproxy/{image_url}  — 画像リバースプロキシ (1時間キャッシュ対応)
+# /imgproxy/{image_url}  — 画像リバースプロキシ (1時間キャッシュ)
 # -------------------------------------------------------
 @app.get("/imgproxy/{image_url:path}")
 async def imgproxy(image_url: str, request: Request):
-    # 広告ドメインの画像を弾く
     for ad_domain in AD_DOMAINS:
         if ad_domain in image_url:
             return Response(status_code=404, content=b"Blocked Ad Image")
@@ -260,7 +290,6 @@ async def imgproxy(image_url: str, request: Request):
     if not image_url.startswith("http"):
         image_url = "https://" + image_url
 
-    # ★ 1時間のメモリキャッシュ確認
     cache_key = f"img:{image_url}"
     if cache_key in _CACHE:
         timestamp, c_content, c_status, c_headers, c_media = _CACHE[cache_key]
@@ -283,10 +312,9 @@ async def imgproxy(image_url: str, request: Request):
         res = await core.http_client.get(image_url, headers=proxy_headers)
         res_headers = {k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS}
         res_headers["Access-Control-Allow-Origin"] = "*"
-        res_headers["Cache-Control"] = "public, max-age=3600" # ブラウザにも1時間キャッシュを指示
+        res_headers["Cache-Control"] = "public, max-age=3600"
         media_type = res.headers.get("content-type", "image/webp")
 
-        # ★ 通信成功(200)ならメモリキャッシュに保存
         if res.status_code == 200:
             _CACHE[cache_key] = (time.time(), res.content, res.status_code, res_headers, media_type)
 
@@ -308,7 +336,7 @@ async def root():
     return RedirectResponse(url=f"/{DEFAULT_SITE}/")
 
 # -------------------------------------------------------
-# /{raw_path}  — 汎用リバースプロキシ (1時間キャッシュ対応)
+# /{raw_path}  — 汎用リバースプロキシ (1時間キャッシュ)
 # -------------------------------------------------------
 @app.api_route("/{raw_path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def proxy(request: Request, raw_path: str):
@@ -332,7 +360,6 @@ async def proxy(request: Request, raw_path: str):
     if request.url.query:
         url += f"?{request.url.query}"
 
-    # ★ GET通信なら1時間のメモリキャッシュ確認
     cache_key = f"{request.method}:{url}"
     if request.method == "GET" and cache_key in _CACHE:
         timestamp, c_content, c_status, c_headers, c_media = _CACHE[cache_key]
@@ -383,17 +410,15 @@ async def proxy(request: Request, raw_path: str):
         res_headers = {k: v for k, v in res.headers.items() if k.lower() not in _SKIP_HEADERS}
         res_headers["Access-Control-Allow-Origin"] = "*"
         res_headers["Access-Control-Allow-Credentials"] = "true"
-        res_headers["Cache-Control"] = "public, max-age=3600" # ブラウザに1時間キャッシュを指示
+        res_headers["Cache-Control"] = "public, max-age=3600"
 
-        # ★ サーバー側からのリダイレクト(301/302等)を検知して制御
+        # サーバー側リダイレクト(301/302)の徹底ブロック＆書き換え
         if res.status_code in (301, 302, 303, 307, 308):
             loc = res_headers.get("location", "")
             if loc:
-                # 広告ドメインへ飛ばされそうになったらブロックしてトップページへ戻す
                 if any(ad in loc for ad in AD_DOMAINS):
                     return RedirectResponse(url=f"/{site_key}/")
                 
-                # サイト内の正常なリダイレクトなら、プロキシ用のURLに書き換えて許可
                 if loc.startswith("http"):
                     loc = loc.replace(origin, f"/{site_key}")
                 if loc.startswith("/"):
@@ -409,7 +434,6 @@ async def proxy(request: Request, raw_path: str):
             
             encoded_html = html.encode("utf-8")
             
-            # ★ 成功(200)ならHTMLをメモリキャッシュに保存
             if request.method == "GET" and res.status_code == 200:
                 _CACHE[cache_key] = (time.time(), encoded_html, res.status_code, res_headers, content_type)
 
@@ -420,7 +444,6 @@ async def proxy(request: Request, raw_path: str):
                 media_type=content_type,
             )
 
-        # HTML以外（APIやJSON）のキャッシュ処理
         if request.method == "GET" and res.status_code == 200:
             _CACHE[cache_key] = (time.time(), res.content, res.status_code, res_headers, content_type)
 
