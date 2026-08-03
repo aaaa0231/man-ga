@@ -1,6 +1,7 @@
 import re
 import time
 import urllib.parse
+import json
 from contextlib import asynccontextmanager
 from typing import Dict, Tuple
 
@@ -10,25 +11,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import RedirectResponse
 
-# -------------------------------------------------------
-# 【通信量節約・エコ設定】キャッシュを3日間に延長
-# -------------------------------------------------------
 _CACHE: Dict[str, Tuple[float, bytes, int, dict, str]] = {}
-CACHE_TTL = 259200  # 3日間
+CACHE_TTL = 259200  # 3日間キャッシュ
 
-# -------------------------------------------------------
-# 【マルチサイト設定】
-# -------------------------------------------------------
 SITES = {
     "mangarw": "https://mangarw.com",
     "soraraw": "https://soraraw.com",
 }
-
 DEFAULT_SITE = "mangarw"
 
-# -------------------------------------------------------
-# 広告・リダイレクト用ドメインリスト
-# -------------------------------------------------------
 AD_DOMAINS = [
     "universityshocksooner.com",
     "adexchangerapid.com",
@@ -45,16 +36,12 @@ core = Core()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # httpxのタイムアウト設定（Brotli解凍機能などはrequirements.txtに依存）
     core.http_client = httpx.AsyncClient(timeout=30.0, follow_redirects=False)
     yield
     await core.http_client.aclose()
 
 app = FastAPI(lifespan=lifespan)
-
-# ★【通信量節約】1KB以上のデータはすべて自動で圧縮してスマホに送る
 app.add_middleware(GZipMiddleware, minimum_size=1000)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -71,7 +58,7 @@ _SKIP_HEADERS = {
 }
 
 # -------------------------------------------------------
-# 【超強化版】リダイレクト・ポップアップ完全抹殺スクリプト
+# 【修正版】必須プログラムは壊さず、ウザい広告だけを消すスクリプト
 # -------------------------------------------------------
 ANTI_REDIRECT_SCRIPT = """
 <style>
@@ -97,33 +84,18 @@ iframe[src*="about:blank"], iframe:not([src]) {
         }, true);
     } catch(e) {}
 
-    const originalCreateElement = document.createElement.bind(document);
-    document.createElement = function(tagName, options) {
-        const el = originalCreateElement(tagName, options);
-        if (tagName.toLowerCase() === 'script') {
-            const originalSetAttribute = el.setAttribute.bind(el);
-            el.setAttribute = function(name, value) {
-                if (name.toLowerCase() === 'src' && value.includes('http') && !value.includes(location.host)) {
-                    return;
-                }
-                return originalSetAttribute(name, value);
-            };
-        }
-        return el;
-    };
-
     function sanitizeElement(el) {
         if (!el) return;
         if (el.getAttribute && el.getAttribute('onclick')) {
             const onclickVal = el.getAttribute('onclick');
-            if (onclickVal.includes('window.open') || onclickVal.includes('location') || onclickVal.includes('http')) {
+            if (onclickVal.includes('window.open') || onclickVal.includes('location')) {
                 el.removeAttribute('onclick');
             }
         }
         if (el.tagName === 'A') el.removeAttribute('target');
     }
 
-    ['click', 'touchstart', 'touchend', 'mousedown', 'mouseup'].forEach(eventType => {
+    ['click', 'touchstart', 'mousedown'].forEach(eventType => {
         document.addEventListener(eventType, function(e) {
             let target = e.target;
             while (target && target !== document.body) {
@@ -131,7 +103,7 @@ iframe[src*="about:blank"], iframe:not([src]) {
                 const style = window.getComputedStyle(target);
                 if ((style.position === 'fixed' || style.position === 'absolute') &&
                     (parseInt(style.zIndex) > 500) &&
-                    !target.querySelector('img') && !target.querySelector('video') &&
+                    !target.querySelector('img') && !target.querySelector('canvas') &&
                     target.tagName !== 'A' && target.tagName !== 'BUTTON') {
                     if (target.offsetWidth > window.innerWidth * 0.8 && target.offsetHeight > window.innerHeight * 0.8) {
                         e.stopPropagation();
@@ -145,13 +117,8 @@ iframe[src*="about:blank"], iframe:not([src]) {
         }, true);
     });
 
-    function cleanUp() {
-        document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
-        document.querySelectorAll('[onclick]').forEach(el => sanitizeElement(el));
-    }
     document.addEventListener('DOMContentLoaded', () => {
-        cleanUp();
-        setInterval(cleanUp, 300);
+        document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
     });
 })();
 </script>
@@ -164,19 +131,15 @@ _CSS_URL_RE = re.compile(
 )
 
 # -------------------------------------------------------
-# 【大改造】Google公式プロキシによる通信量ゼロ＆MDM突破システム
+# 【強化版】Cloudflareを突破しやすいDuckDuckGoプロキシ
 # -------------------------------------------------------
 def _to_imgproxy(url: str) -> str:
-    # 既にGoogleプロキシ化されている場合はそのまま
-    if "googleusercontent.com" in url:
+    if "duckduckgo.com" in url or "googleusercontent.com" in url:
         return url
-    
-    # 広告ドメインは完全にブロック（通信させない）
     for ad_domain in AD_DOMAINS:
         if ad_domain in url:
             return "about:blank"
     
-    # URLを整形してエンコード
     if url.startswith("//"):
         url = "https:" + url
     elif not url.startswith("http"):
@@ -184,11 +147,9 @@ def _to_imgproxy(url: str) -> str:
         
     encoded_url = urllib.parse.quote(url)
     
-    # 🌟 Googleの公式画像プロキシのURLを直接生成
-    # refresh=31536000 でGoogleサーバー側に1年間キャッシュさせます
-    google_proxy = f"https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=31536000&url={encoded_url}"
-    
-    return google_proxy
+    # 🌟 直リンク禁止の突破力が高い DuckDuckGo の公式プロキシを使用
+    duck_proxy = f"https://external-content.duckduckgo.com/iu/?u={encoded_url}"
+    return duck_proxy
 
 def _rewrite_srcset(srcset: str) -> str:
     def replace_url(m: re.Match) -> str:
@@ -199,7 +160,6 @@ def remove_ads(html: str) -> str:
     html = re.sub(r'<meta[^>]*http-equiv=["\']?refresh["\']?[^>]*>', '', html, flags=re.IGNORECASE)
     for domain in AD_DOMAINS:
         escaped = re.escape(domain)
-        html = re.sub(r"<script[^>]*" + escaped + r"[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
         html = re.sub(r"<iframe[^>]*" + escaped + r"[^>]*>.*?</iframe>", "", html, flags=re.IGNORECASE | re.DOTALL)
         html = re.sub(r"<a[^>]*" + escaped + r"[^>]*>.*?</a>", "", html, flags=re.IGNORECASE | re.DOTALL)
     html = re.sub(r'onclick=["\'][^"\']*(?:window\.open|location\.href|location\.assign)[^"\']*["\']', '', html, flags=re.IGNORECASE)
@@ -228,26 +188,23 @@ def rewrite_site_links(html: str, site_key: str, origin: str) -> str:
 def rewrite_img_urls(html: str) -> str:
     def rewrite_src(m: re.Match) -> str:
         attr, quote, url = m.group(1), m.group(2), m.group(3)
-        if url.startswith("data:") or "googleusercontent.com" in url:
+        if url.startswith("data:") or "duckduckgo.com" in url or "googleusercontent.com" in url:
             return m.group(0)
         return f"{attr}={quote}{_to_imgproxy(url)}{quote}"
     html = re.sub(r'(src)=(["\'])(https?://[^\s"\']+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\']*)\2', rewrite_src, html, flags=re.IGNORECASE)
-    html = re.sub(r'(data-(?:src|lazy-src|original|bg))=(["\'])(https?://[^\s"\']+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\']*)\2', rewrite_src, html, flags=re.IGNORECASE)
+    html = re.sub(r'(data-(?:src|lazy-src|original|bg|image))=(["\'])(https?://[^\s"\']+\.(?:webp|jpe?g|png|gif|svg|avif|bmp|ico)[^\s"\']*)\2', rewrite_src, html, flags=re.IGNORECASE)
     def rewrite_srcset_attr(m: re.Match) -> str:
         attr, quote, val = m.group(1), m.group(2), m.group(3)
         return f"{attr}={quote}{_rewrite_srcset(val)}{quote}"
     html = re.sub(r'((?:data-)?srcset)=(["\'])([^"\']+)\2', rewrite_srcset_attr, html, flags=re.IGNORECASE)
     def rewrite_css_url(m: re.Match) -> str:
         quote, url = m.group(1), m.group(2)
-        if url.startswith("data:") or "googleusercontent.com" in url:
+        if url.startswith("data:") or "duckduckgo.com" in url or "googleusercontent.com" in url:
             return m.group(0)
         return f"url({quote}{_to_imgproxy(url)}{quote})"
     html = _CSS_URL_RE.sub(rewrite_css_url, html)
     return html
 
-# -------------------------------------------------------
-# 【バックアップ】相対パスなどで /imgproxy/ が呼ばれた場合のリダイレクト
-# -------------------------------------------------------
 @app.get("/imgproxy/{image_url:path}")
 async def imgproxy(image_url: str):
     for ad_domain in AD_DOMAINS:
@@ -259,10 +216,8 @@ async def imgproxy(image_url: str):
         image_url = "https://" + image_url
 
     encoded_url = urllib.parse.quote(image_url)
-    google_proxy = f"https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=31536000&url={encoded_url}"
-    
-    # Renderは画像を処理せず、ブラウザに「Googleへ取りに行け」と指示
-    return RedirectResponse(url=google_proxy, status_code=302)
+    duck_proxy = f"https://external-content.duckduckgo.com/iu/?u={encoded_url}"
+    return RedirectResponse(url=duck_proxy, status_code=302)
 
 @app.get("/")
 async def root():
@@ -312,17 +267,16 @@ async def proxy(request: Request, raw_path: str):
         "Host": origin.replace("https://", "").replace("http://", ""),
         "X-Forwarded-Host": request.headers.get("host", ""),
         "X-Forwarded-Proto": "https",
-        "User-Agent": request.headers.get("user-agent", "Mozilla/5.0"),
+        "User-Agent": request.headers.get("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
         "Accept": request.headers.get("accept", "*/*"),
         "Accept-Language": request.headers.get("accept-language", "ja,en-US;q=0.9,en;q=0.8"),
         "Cookie": request.headers.get("cookie", ""),
         "Referer": fake_referer,
         "Origin": origin,
-        # ★サイトからBrotliなどの圧縮形式で受け取る設定
         "Accept-Encoding": "gzip, deflate, br", 
     }
 
-    for header_name in ["content-type", "x-requested-with", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"]:
+    for header_name in ["x-requested-with", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"]:
         if header_name in request.headers:
             proxy_headers[header_name.title()] = request.headers[header_name]
 
@@ -356,22 +310,48 @@ async def proxy(request: Request, raw_path: str):
                         loc = f"/{site_key}{loc}"
                 res_headers["location"] = loc
 
+        # -------------------------------------------------------
+        # ★【新規追加】JSONデータの画像URLもプロキシに書き換える
+        # -------------------------------------------------------
+        if "application/json" in content_type and res.content:
+            try:
+                json_data = json.loads(res.content.decode("utf-8", errors="ignore"))
+                def process_json(data):
+                    if isinstance(data, dict):
+                        return {k: process_json(v) for k, v in data.items()}
+                    elif isinstance(data, list):
+                        return [process_json(i) for i in data]
+                    elif isinstance(data, str):
+                        if data.startswith("http") and any(data.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"]):
+                            return _to_imgproxy(data)
+                        if "<" in data and "src=" in data:
+                            return rewrite_img_urls(data)
+                        return data
+                    return data
+
+                new_json = process_json(json_data)
+                encoded_json = json.dumps(new_json, ensure_ascii=False).encode("utf-8")
+                
+                if request.method == "GET" and res.status_code == 200:
+                    _CACHE[cache_key] = (time.time(), encoded_json, res.status_code, res_headers, content_type)
+                return Response(content=encoded_json, status_code=res.status_code, headers=res_headers, media_type=content_type)
+            except Exception:
+                pass # JSON変換エラー時はそのまま送る
+
+        # HTMLの処理
         if "text/html" in content_type:
             html = res.content.decode("utf-8", errors="ignore")
             html = remove_ads(html)
             html = rewrite_site_links(html, site_key, origin)
             html = rewrite_img_urls(html)
-            
             encoded_html = html.encode("utf-8")
             
             if request.method == "GET" and res.status_code == 200:
                 _CACHE[cache_key] = (time.time(), encoded_html, res.status_code, res_headers, content_type)
-
             return Response(content=encoded_html, status_code=res.status_code, headers=res_headers, media_type=content_type)
 
         if request.method == "GET" and res.status_code == 200:
             _CACHE[cache_key] = (time.time(), res.content, res.status_code, res_headers, content_type)
-
         return Response(content=res.content, status_code=res.status_code, headers=res_headers, media_type=content_type)
 
     except Exception as e:
