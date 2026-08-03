@@ -62,6 +62,7 @@ _SKIP_HEADERS = {
 # -------------------------------------------------------
 ANTI_REDIRECT_SCRIPT = """
 <style>
+/* 広告やポップアップを非表示にする */
 [class*="ad-"], [class*="ad_"], [id*="ad-"], [id*="ad_"],
 [class*="banner"], [id*="banner"], [class*="pop-"], [class*="popup"],
 div[style*="z-index: 2147483647"], div[style*="z-index: 99999"],
@@ -70,6 +71,17 @@ iframe[src*="about:blank"], iframe:not([src]) {
     visibility: hidden !important;
     opacity: 0 !important;
     pointer-events: none !important;
+}
+
+/* 🌟 続きを読むボタンを保護（追加部分） */
+#load-more-chapters, .load-more, .read-more {
+    display: block !important; 
+    visibility: visible !important; 
+    opacity: 1 !important;
+    background-color: #3b82f6 !important; 
+    color: white !important;
+    pointer-events: auto !important; /* 確実にクリックできるようにする */
+    z-index: 999999 !important; /* 他の要素に埋もれないように最前面へ */
 }
 </style>
 <script>
@@ -86,6 +98,12 @@ iframe[src*="about:blank"], iframe:not([src]) {
 
     function sanitizeElement(el) {
         if (!el) return;
+        
+        // ★ 保護したボタンのクリック機能は絶対に消さないように除外
+        if (el.id === 'load-more-chapters' || el.classList?.contains('load-more') || el.classList?.contains('read-more')) {
+            return; 
+        }
+
         if (el.getAttribute && el.getAttribute('onclick')) {
             const onclickVal = el.getAttribute('onclick');
             if (onclickVal.includes('window.open') || onclickVal.includes('location')) {
@@ -99,6 +117,11 @@ iframe[src*="about:blank"], iframe:not([src]) {
         document.addEventListener(eventType, function(e) {
             let target = e.target;
             while (target && target !== document.body) {
+                // ★ 保護したボタンならJSの強制削除処理をストップ
+                if (target.id === 'load-more-chapters' || (target.classList && (target.classList.contains('load-more') || target.classList.contains('read-more')))) {
+                    return; 
+                }
+                
                 sanitizeElement(target);
                 const style = window.getComputedStyle(target);
                 if ((style.position === 'fixed' || style.position === 'absolute') &&
