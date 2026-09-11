@@ -17,6 +17,7 @@ CACHE_TTL = 259200  # 3日間キャッシュ
 SITES = {
     "mangarw": "https://mangarw.com",
     "soraraw": "https://soraraw.com",
+    "anime" : "https://anitube.pro",
 }
 DEFAULT_SITE = "mangarw"
 
